@@ -1,0 +1,14 @@
+# 本機開發用 venv，不可移植、不上傳
+/hmr2_venv/
+
+# OS
+.DS_Store
+**/.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 4D-Humans/ 內部已有自己的 .gitignore（data/、results/、logs*/、checkpoints/、*.pt、*.npy 等），
+# 移除其內部 .git 後這些規則仍然生效，不需要在這裡重複。
