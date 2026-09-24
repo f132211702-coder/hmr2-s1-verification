@@ -22,10 +22,14 @@ available):
     - A 3DPW clip can have more than one person; match_prediction() only
       does bbox-IoU matching so far and hasn't been tested on a multi-person
       case.
-    - The assumed 3DPW frame-extraction filename convention
-      (image_%05d.jpg) is a common convention from the official release
-      scripts, not verified against files on this machine — adjust
-      _3dpw_frame_image_id() if it doesn't match reality.
+    - The assumed 3DPW frame filename convention (image_%05d.jpg per
+      sequence) is a common one from the official release scripts, not
+      verified against files on this machine — adjust load_3dpw_gt()'s
+      image_id construction if it doesn't match reality. It must stay in
+      sync with how s1_infer.py's --img_folder mode derives image_id from
+      a file's path relative to the given folder (both replace "/" with
+      "__", since 3DPW restarts frame numbering inside every sequence
+      subfolder).
 
 Usage (skeleton self-test, no real dataset or GPU needed):
     python eval/eval_against_gt.py --self-test
@@ -242,10 +246,10 @@ def load_3dpw_gt(seq_pkl_path: Path) -> list[PoseRecord]:
     and adjust this function if the real fields differ.
 
     image_id currently assumes the frame-extraction convention
-    `<sequence_name>/image_%05d` (a common one from 3DPW's official
-    extraction scripts) — this needs to match whatever load_predictions()
-    used as its image_id, or predictions won't match up with GT for the
-    same frame.
+    `<sequence_name>__image_%05d` (matching s1_infer.py's --img_folder
+    naming, see its module docstring) — this needs to match whatever
+    load_predictions() used as its image_id, or predictions won't match up
+    with GT for the same frame.
     """
     import pickle
 
@@ -266,7 +270,10 @@ def load_3dpw_gt(seq_pkl_path: Path) -> list[PoseRecord]:
         for frame_idx in range(num_frames):
             if valid is not None and not valid[frame_idx]:
                 continue
-            image_id = f"{seq_name}/image_{frame_idx:05d}"
+            # "__" (not "/") to match s1_infer.py's --img_folder naming,
+            # which replaces path separators the same way to avoid
+            # different sequences' identically-numbered frames colliding.
+            image_id = f"{seq_name}__image_{frame_idx:05d}"
             pose_frame = poses[frame_idx].reshape(24, 3)  # axis-angle, joint 0 = global_orient
             joints_3d = None
             if joint_positions is not None:

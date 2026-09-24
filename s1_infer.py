@@ -328,12 +328,26 @@ def main() -> None:
     if not args.img and not args.img_folder:
         raise SystemExit("Provide either --img or --img_folder")
 
+    # image_id is what goes into the output filename. For --img it's just
+    # the stem; for --img_folder it's the path *relative to that folder*
+    # with "/" turned into "__" — datasets like 3DPW restart numbering
+    # (image_00000.jpg, ...) inside every sequence subfolder, so using only
+    # the bare filename here would let one sequence's results silently
+    # overwrite another's.
     img_paths: list[Path] = []
+    image_ids: list[str] = []
     if args.img:
-        img_paths.append(Path(args.img))
+        p = Path(args.img)
+        img_paths.append(p)
+        image_ids.append(p.stem)
     if args.img_folder:
         folder = Path(args.img_folder)
-        img_paths.extend(sorted(folder.rglob("*.jpg")) + sorted(folder.rglob("*.png")))
+        found = sorted(folder.rglob("*.jpg")) + sorted(folder.rglob("*.png"))
+        img_paths.extend(found)
+        image_ids.extend(
+            p.relative_to(folder).with_suffix("").as_posix().replace("/", "__")
+            for p in found
+        )
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -347,15 +361,15 @@ def main() -> None:
                          score_thresh=args.score_thresh,
                          batch_size=args.batch_size)
 
-    for img_path in img_paths:
+    for img_path, image_id in zip(img_paths, image_ids):
         img_bgr = cv2.imread(str(img_path))
         if img_bgr is None:
             print(f"[warn] could not read {img_path}, skipping")
             continue
         people = est.estimate(img_bgr, score_thresh=args.score_thresh)
-        print(f"{img_path.name}: {len(people)} person(s) detected")
+        print(f"{image_id}: {len(people)} person(s) detected")
         for p in people:
-            npz_path = out_dir / f"{img_path.stem}_{p['person_id']}_smpl_params.npz"
+            npz_path = out_dir / f"{image_id}_{p['person_id']}_smpl_params.npz"
             np.savez(npz_path, betas=p["betas"], body_pose=p["body_pose"],
                      global_orient=p["global_orient"], cam_t=p["cam_t"],
                      bbox=p["bbox"], scaled_focal_length=p["scaled_focal_length"],
