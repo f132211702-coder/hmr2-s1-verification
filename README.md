@@ -53,6 +53,19 @@ The SMPL neutral body model can't be redistributed here (license
 restriction): register at https://smplify.is.tue.mpg.de/ and place it at
 `~/.cache/4DHumans/data/smpl/SMPL_NEUTRAL.pkl`.
 
+### Known install issue: `chumpy`
+
+`conda`'s pip section doesn't reliably install `git+https://...` dependencies
+(it can silently skip them), so `chumpy` — needed by `smplx` to read
+`SMPL_NEUTRAL.pkl` — sometimes ends up missing after `conda env create`.
+`pip install`ing it also fails on its own with a `ModuleNotFoundError: No
+module named 'pip'` error, because chumpy's old-style `setup.py` does
+`import pip` and pip's build isolation doesn't include pip itself. Fix:
+
+```bash
+pip install --no-build-isolation git+https://github.com/mattloper/chumpy
+```
+
 ## Environment variables
 
 | Variable | Purpose | Default |
