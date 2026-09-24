@@ -23,6 +23,7 @@ dependencies:
     - dill
     - pandas
     - transformers  # default person detector backend (RT-DETR via HuggingFace)
+    - matplotlib    # used by tools/visualize.py's render_mesh_shaded()
     - git+https://github.com/facebookresearch/detectron2  # optional: only needed for --detector-backend detectron2
     - git+https://github.com/mattloper/chumpy              # required at runtime by smplx's SMPL loader
 
