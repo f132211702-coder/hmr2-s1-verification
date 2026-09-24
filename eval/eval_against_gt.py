@@ -1,34 +1,41 @@
 #!/usr/bin/env python3
-"""S1 量化評估：把 hmr2_estimator.py 的預測結果跟資料集提供的 GT SMPL 比對，
-算 MPJPE / PA-MPJPE（姿勢/關節誤差）與 β 誤差（體型誤差）。
+"""S1 quantitative evaluation: compare s1_infer.py's predictions against the
+ground-truth SMPL parameters shipped with a dataset, and report MPJPE /
+PA-MPJPE (joint/pose error) and beta error (shape error).
 
-現況：3DPW、CloSe-Di 都還沒下載，這支是骨架——誤差計算（MPJPE/PA-MPJPE/
-β 誤差、Procrustes 對齊）是純數學，已經用假資料驗證過邏輯正確（見
---self-test）。GT 載入函式（load_3dpw_gt / load_close_di_gt）的欄位名稱是
-照公開文件記的格式寫的，**還沒有拿真實檔案驗證過**，標了 TODO 的地方拿到
-真實資料後要先確認欄位名稱、再視情況調整。
+Status: 3DPW and CloSe-Di haven't been downloaded yet, so this is a
+skeleton. The error math (MPJPE / PA-MPJPE / Procrustes alignment / beta
+error) is pure math and has already been validated against synthetic data
+(see --self-test). The GT loaders (load_3dpw_gt / load_close_di_gt) use
+field names taken from public documentation and have **not** been verified
+against real files yet — look for the TODO markers before relying on them.
 
-已知需要之後確認/處理的事（不是本次骨架能解決的）：
-    - 3DPW 的 GT 是用「性別化」SMPL（male/female）算的，HMR2 只輸出 neutral
-      SMPL 的參數。目前本機只有 SMPL_NEUTRAL.pkl，兩邊用不同模型算出來的
-      關節位置本身就有系統性差異，不是 HMR2 的誤差。要嘛額外去
-      https://smpl.is.tue.mpg.de/ 下載性別化模型分開算，要嘛先接受這個
-      已知誤差來源、在 finding 裡註明。
-    - 3DPW 一段影片可能不只一個人，目前的 match_predictions_to_gt() 只用
-      bbox IoU 配對，多人場景還沒有拿真實資料測過。
-    - 3DPW 影像的抽幀檔名慣例（image_%05d.jpg）是官方釋出腳本的常見慣例，
-      不是從這台機器上的真實檔案確認過，路徑對不上要調整
-      _3dpw_frame_image_id()。
+Known issues this skeleton does not solve (nothing to do until real data is
+available):
+    - 3DPW's GT is computed with a gendered SMPL model (male/female); HMR2
+      only outputs neutral-SMPL parameters, and only SMPL_NEUTRAL.pkl is
+      available locally. Comparing joints computed from different body
+      models introduces a systematic error that is not HMR2's estimation
+      error. Either download the gendered models separately from
+      https://smpl.is.tue.mpg.de/ and evaluate against those, or accept
+      this as a known error source and note it in the finding.
+    - A 3DPW clip can have more than one person; match_prediction() only
+      does bbox-IoU matching so far and hasn't been tested on a multi-person
+      case.
+    - The assumed 3DPW frame-extraction filename convention
+      (image_%05d.jpg) is a common convention from the official release
+      scripts, not verified against files on this machine — adjust
+      _3dpw_frame_image_id() if it doesn't match reality.
 
-用法（骨架自我測試，不需要任何真實資料/GPU）：
-    python scripts/eval_against_gt.py --self-test
+Usage (skeleton self-test, no real dataset or GPU needed):
+    python eval/eval_against_gt.py --self-test
 
-用法（資料下載好、hmr2_estimator.py 已經跑過產生 --pred_dir 之後）：
-    python scripts/eval_against_gt.py --dataset 3dpw \\
+Usage (once data is downloaded and s1_infer.py has produced --pred_dir):
+    python eval/eval_against_gt.py --dataset 3dpw \\
         --pred_dir results/s1_raw_3dpw --gt_dir /path/to/3DPW/sequenceFiles/test \\
         --out results/eval_3dpw.csv
 
-    python scripts/eval_against_gt.py --dataset close-di \\
+    python eval/eval_against_gt.py --dataset close-di \\
         --pred_dir results/s1_raw_close_di --gt_dir /path/to/CloSe-Di \\
         --out results/eval_close_di.csv
 """
@@ -46,8 +53,9 @@ _orig_torch_load = torch.load
 
 
 def _patched_torch_load(*args, **kwargs):
-    # 跟 hmr2_estimator.py 同樣的理由：smplx 讀 SMPL_NEUTRAL.pkl 走 pickle，
-    # 舊版 pytorch-lightning 沒跟上 torch>=2.6 weights_only=True 的新預設值。
+    # Same reason as s1_infer.py: smplx's SMPL_NEUTRAL.pkl loader goes
+    # through pickle, and the pinned pytorch-lightning version predates
+    # torch>=2.6's weights_only=True default.
     kwargs["weights_only"] = False
     return _orig_torch_load(*args, **kwargs)
 
@@ -56,28 +64,28 @@ torch.load = _patched_torch_load
 
 
 # ---------------------------------------------------------------------------
-# 共用資料結構
+# Shared data structure
 # ---------------------------------------------------------------------------
 
 @dataclass
 class PoseRecord:
-    """一個人的 SMPL 參數，不管是預測還是 GT 都用這個格式，方便共用同一套
-    比對/計算邏輯。"""
+    """One person's SMPL parameters — used for both predictions and GT, so
+    the matching/scoring logic below is shared regardless of source."""
     image_id: str
     person_id: int
     betas: np.ndarray                      # (10,)
-    body_pose_aa: np.ndarray                # (23,3) axis-angle，不含 global_orient
+    body_pose_aa: np.ndarray                # (23,3) axis-angle, excludes global_orient
     global_orient_aa: np.ndarray            # (3,) axis-angle
-    bbox: np.ndarray | None = None          # (4,) [x1,y1,x2,y2]，配對用
-    joints_3d: np.ndarray | None = None     # (J,3)，若資料集直接提供就不用重算
+    bbox: np.ndarray | None = None          # (4,) [x1,y1,x2,y2], used for matching
+    joints_3d: np.ndarray | None = None     # (J,3), if the dataset provides it directly
 
 
 # ---------------------------------------------------------------------------
-# 姿勢表示轉換 / SMPL forward（算 joints 用）
+# Pose representation conversion / SMPL forward (for computing joints)
 # ---------------------------------------------------------------------------
 
 def rotmat_to_aa(rotmat: np.ndarray) -> np.ndarray:
-    """(...,3,3) 旋轉矩陣 → (...,3) axis-angle。"""
+    """(...,3,3) rotation matrices -> (...,3) axis-angle."""
     from scipy.spatial.transform import Rotation
     shape = rotmat.shape[:-2]
     aa = Rotation.from_matrix(rotmat.reshape(-1, 3, 3)).as_rotvec()
@@ -85,9 +93,10 @@ def rotmat_to_aa(rotmat: np.ndarray) -> np.ndarray:
 
 
 def build_smpl_layer(device: "torch.device" = None, gender: str = "neutral"):
-    """載入 SMPL layer。目前本機只有 SMPL_NEUTRAL.pkl（HMR2 官方釋出的就只有
-    這個），gender="male"/"female" 需要自行從 https://smpl.is.tue.mpg.de/
-    另外下載 SMPL_MALE.pkl / SMPL_FEMALE.pkl 放到同一個資料夾才能用。"""
+    """Load an SMPL layer. Only SMPL_NEUTRAL.pkl is available locally (the
+    only one HMR2's official release ships). gender="male"/"female" needs
+    SMPL_MALE.pkl / SMPL_FEMALE.pkl downloaded separately from
+    https://smpl.is.tue.mpg.de/ into the same folder."""
     import smplx
     from hmr2.configs import CACHE_DIR_4DHUMANS
 
@@ -96,14 +105,16 @@ def build_smpl_layer(device: "torch.device" = None, gender: str = "neutral"):
     smpl_path = Path(CACHE_DIR_4DHUMANS) / "data" / "smpl" / filename
     if not smpl_path.exists():
         raise FileNotFoundError(
-            f"{smpl_path} 不存在。gender={gender!r} 的 SMPL 模型需要自行到 "
-            f"https://smpl.is.tue.mpg.de/ 註冊下載，放到這個路徑。"
+            f"{smpl_path} does not exist. The gender={gender!r} SMPL model "
+            f"must be downloaded separately from https://smpl.is.tue.mpg.de/ "
+            f"and placed at that path."
         )
     return smplx.SMPLLayer(model_path=str(smpl_path), num_betas=10).to(device).eval()
 
 
 def get_joints(smpl_layer, record: PoseRecord, device: "torch.device" = None) -> np.ndarray:
-    """優先用資料集直接提供的 joints_3d；沒有的話才用 SMPL forward 算。"""
+    """Prefer the dataset's own precomputed joints_3d if present; otherwise
+    compute them via an SMPL forward pass."""
     if record.joints_3d is not None:
         return record.joints_3d
 
@@ -122,13 +133,15 @@ def get_joints(smpl_layer, record: PoseRecord, device: "torch.device" = None) ->
 
 
 # ---------------------------------------------------------------------------
-# 誤差計算（純數學，不依賴任何資料集格式，--self-test 驗證的就是這一段）
+# Error metrics (pure math, independent of any dataset format — this is
+# what --self-test validates)
 # ---------------------------------------------------------------------------
 
 def compute_similarity_transform(source: np.ndarray, target: np.ndarray) -> np.ndarray:
-    """Procrustes 對齊：找一個旋轉+縮放+平移，把 source 對到 target 上誤差最小
-    （PA-MPJPE 用的標準做法，跟 SPIN/HMR 系列論文的實作邏輯一致）。
-    source, target: (J,3)。回傳對齊後的 source，形狀不變。"""
+    """Procrustes alignment: find the rotation + scale + translation that
+    minimizes the error mapping source onto target (the standard PA-MPJPE
+    approach, matching the SPIN/HMR family of papers). source, target:
+    (J,3). Returns the aligned source, same shape."""
     mu1 = source.mean(axis=0, keepdims=True)
     mu2 = target.mean(axis=0, keepdims=True)
     X1 = source - mu1
@@ -147,24 +160,26 @@ def compute_similarity_transform(source: np.ndarray, target: np.ndarray) -> np.n
 
 
 def mpjpe(pred_joints: np.ndarray, gt_joints: np.ndarray, pelvis_idx: int = 0) -> float:
-    """Mean Per-Joint Position Error，單位 mm（假設輸入是公尺）。root-relative
-    ：兩邊都先減掉骨盆關節座標，只看相對姿勢誤差，排除整體平移的影響。"""
+    """Mean Per-Joint Position Error, in mm (assumes meter inputs).
+    Root-relative: both sides are re-centered on the pelvis joint first, so
+    this only reflects relative-pose error, not overall translation."""
     pred = pred_joints - pred_joints[pelvis_idx:pelvis_idx + 1]
     gt = gt_joints - gt_joints[pelvis_idx:pelvis_idx + 1]
     return float(np.linalg.norm(pred - gt, axis=-1).mean() * 1000)
 
 
 def pa_mpjpe(pred_joints: np.ndarray, gt_joints: np.ndarray) -> float:
-    """Procrustes-Aligned MPJPE，單位 mm。跟 mpjpe() 的差別是先做旋轉/縮放
-    對齊，只看姿勢本身的形狀誤差，排除全域旋轉/縮放/平移——通常比 mpjpe() 小，
-    是論文最常報的指標。"""
+    """Procrustes-Aligned MPJPE, in mm. Differs from mpjpe() by aligning
+    rotation/scale first, so it isolates pose-shape error from global
+    rotation/scale/translation — usually smaller than mpjpe(), and the
+    metric most commonly reported in papers."""
     aligned = compute_similarity_transform(pred_joints, gt_joints)
     return float(np.linalg.norm(aligned - gt_joints, axis=-1).mean() * 1000)
 
 
 def beta_error(pred_betas: np.ndarray, gt_betas: np.ndarray) -> dict:
-    """β（shape）誤差，逐維度 + 整體。不需要對齊，betas 本身就是跟姿勢/位置
-    無關的體型係數。"""
+    """Beta (shape) error, per-dimension and overall. No alignment needed —
+    betas are already pose/position-independent shape coefficients."""
     diff = pred_betas - gt_betas
     return {
         "beta_mae": float(np.abs(diff).mean()),
@@ -174,7 +189,7 @@ def beta_error(pred_betas: np.ndarray, gt_betas: np.ndarray) -> dict:
 
 
 def bbox_iou(box_a: np.ndarray, box_b: np.ndarray) -> float:
-    """標準 IoU，box 格式 [x1,y1,x2,y2]。配對預測/GT 的人用。"""
+    """Standard IoU, boxes as [x1,y1,x2,y2]. Used to match predicted people to GT."""
     xa1, ya1 = max(box_a[0], box_b[0]), max(box_a[1], box_b[1])
     xa2, ya2 = min(box_a[2], box_b[2]), min(box_a[3], box_b[3])
     inter = max(0.0, xa2 - xa1) * max(0.0, ya2 - ya1)
@@ -185,12 +200,12 @@ def bbox_iou(box_a: np.ndarray, box_b: np.ndarray) -> float:
 
 
 # ---------------------------------------------------------------------------
-# 預測結果載入（讀 hmr2_estimator.py 存出來的 npz，格式已知、不是 TODO）
+# Prediction loading (reads s1_infer.py's npz output; format is ours, not a TODO)
 # ---------------------------------------------------------------------------
 
 def load_predictions(pred_dir: Path) -> dict[str, list[PoseRecord]]:
-    """掃 hmr2_estimator.py 存出來的 `<image_id>_<person_id>_smpl_params.npz`，
-    依 image_id 分組回傳。"""
+    """Scan `<image_id>_<person_id>_smpl_params.npz` files produced by
+    s1_infer.py, grouped by image_id."""
     by_image: dict[str, list[PoseRecord]] = {}
     for npz_path in sorted(pred_dir.glob("*_smpl_params.npz")):
         stem = npz_path.stem  # "<image_id>_<person_id>_smpl_params"
@@ -209,23 +224,28 @@ def load_predictions(pred_dir: Path) -> dict[str, list[PoseRecord]]:
 
 
 # ---------------------------------------------------------------------------
-# GT 載入 —— TODO：這兩個函式還沒有拿真實資料測過，見檔頭說明
+# GT loading — TODO: not yet verified against real data, see module docstring
 # ---------------------------------------------------------------------------
 
 def load_3dpw_gt(seq_pkl_path: Path) -> list[PoseRecord]:
-    """載入一個 3DPW sequence 的 GT（`sequenceFiles/{train,validation,test}/*.pkl`）。
+    """Load one 3DPW sequence's GT
+    (`sequenceFiles/{train,validation,test}/*.pkl`).
 
-    TODO 待真實資料驗證：欄位名稱（poses/betas/trans/jointPositions/genders/
-    campose_valid）是官方論文與釋出腳本記載的標準格式，但還沒有拿真實 .pkl
-    檔案跑過 `pickle.load` 確認過。拿到資料後第一步應該是：
+    TODO not yet verified against real data: field names (poses/betas/trans/
+    jointPositions/genders/campose_valid) follow the standard format
+    documented in the paper and release scripts, but haven't been confirmed
+    against an actual .pkl file. Once the data is downloaded, the first
+    step should be:
         import pickle
         d = pickle.load(open(seq_pkl_path, "rb"), encoding="latin1")
         print(d.keys())
-    確認欄位名稱一致再繼續，不一致要照實際欄位調整這裡。
+    and adjust this function if the real fields differ.
 
-    image_id 目前假設抽幀慣例是 `<sequence_name>/image_%05d`（3DPW 官方抽幀
-    腳本的常見命名），要跟 load_predictions() 用同一套 image_id 對得上，
-    才配對得到同一張圖的預測。
+    image_id currently assumes the frame-extraction convention
+    `<sequence_name>/image_%05d` (a common one from 3DPW's official
+    extraction scripts) — this needs to match whatever load_predictions()
+    used as its image_id, or predictions won't match up with GT for the
+    same frame.
     """
     import pickle
 
@@ -238,8 +258,8 @@ def load_3dpw_gt(seq_pkl_path: Path) -> list[PoseRecord]:
     num_people = len(data["poses"])
     for person_id in range(num_people):
         poses = data["poses"][person_id]              # (num_frames, 72)
-        betas = data["betas"][person_id][:10]           # (10,) 或 (300,)，只取前 10 維跟 HMR2 對齊
-        joint_positions = data.get("jointPositions", [None] * num_people)[person_id]  # (num_frames, 24*3) 或 None
+        betas = data["betas"][person_id][:10]           # (10,) or (300,); keep only the first 10 to match HMR2
+        joint_positions = data.get("jointPositions", [None] * num_people)[person_id]  # (num_frames, 24*3) or None
         valid = data.get("campose_valid", [None] * num_people)[person_id]
 
         num_frames = poses.shape[0]
@@ -247,7 +267,7 @@ def load_3dpw_gt(seq_pkl_path: Path) -> list[PoseRecord]:
             if valid is not None and not valid[frame_idx]:
                 continue
             image_id = f"{seq_name}/image_{frame_idx:05d}"
-            pose_frame = poses[frame_idx].reshape(24, 3)  # axis-angle，joint 0 = global_orient
+            pose_frame = poses[frame_idx].reshape(24, 3)  # axis-angle, joint 0 = global_orient
             joints_3d = None
             if joint_positions is not None:
                 joints_3d = joint_positions[frame_idx].reshape(24, 3)
@@ -263,13 +283,15 @@ def load_3dpw_gt(seq_pkl_path: Path) -> list[PoseRecord]:
 
 
 def load_close_di_gt(npz_path: Path) -> PoseRecord:
-    """載入一個 CloSe-Di scan 的 GT（規劃文件 3.2 節記載的欄位：betas/pose/
-    trans/canon_pose）。
+    """Load one CloSe-Di scan's GT (fields per the pipeline plan doc's
+    section 3.2: betas/pose/trans/canon_pose).
 
-    TODO 待真實資料驗證：規劃文件是根據 CloSe-D 論文/repo 文件整理的欄位名稱，
-    還沒有拿真實 .npz 檔案確認過。image_id 目前假設等於檔名 stem（CloSe-Di
-    是逐 scan 一個檔案，不像 3DPW 是影片序列，配對邏輯簡單很多，風險較低，
-    但一樣要拿到真實資料後跑一次確認)。
+    TODO not yet verified against real data: the plan doc's field names
+    were compiled from the CloSe-D paper/repo docs, not confirmed against
+    an actual .npz file. image_id currently assumes it equals the filename
+    stem (CloSe-Di is one file per scan rather than a video sequence, so
+    matching is much simpler than 3DPW and lower risk, but still needs a
+    real-file check).
     """
     data = np.load(npz_path)
     pose = data["pose"]  # (72,) axis-angle
@@ -284,19 +306,19 @@ def load_close_di_gt(npz_path: Path) -> PoseRecord:
 
 
 # ---------------------------------------------------------------------------
-# 配對 + 評估主流程
+# Matching + evaluation driver
 # ---------------------------------------------------------------------------
 
 def match_prediction(preds: list[PoseRecord], gt: PoseRecord) -> PoseRecord | None:
-    """一張圖裡預測跟 GT 的人數可能不一樣（漏偵測/多偵測），用 bbox IoU 配對，
-    取 IoU 最高且 > 0 的那個。只有一個人的情況（CloSe-Di 大多數 case）直接
-    回傳唯一的預測。"""
+    """An image's number of predictions and GT people can differ (missed or
+    extra detections); match by highest bbox IoU (must be > 0). If there's
+    only one prediction (most CloSe-Di cases), it's returned directly."""
     if not preds:
         return None
     if len(preds) == 1:
         return preds[0]
     if gt.bbox is None:
-        return preds[0]  # 沒有 GT bbox 可比對，退而求其次選第一個（TODO：不理想）
+        return preds[0]  # no GT bbox to compare against; fall back to the first one (TODO: not ideal)
     best, best_iou = None, 0.0
     for p in preds:
         if p.bbox is None:
@@ -309,8 +331,8 @@ def match_prediction(preds: list[PoseRecord], gt: PoseRecord) -> PoseRecord | No
 
 def evaluate(pred_by_image: dict[str, list[PoseRecord]], gt_records: list[PoseRecord],
              smpl_layer, device: "torch.device" = None) -> list[dict]:
-    """通用評估迴圈，3DPW／CloSe-Di 共用——兩邊都已經轉成 PoseRecord 之後，
-    後面的配對/算誤差邏輯完全一樣。"""
+    """Generic evaluation loop shared by 3DPW and CloSe-Di — once both are
+    converted to PoseRecord, matching/scoring is identical."""
     rows = []
     for gt in gt_records:
         preds = pred_by_image.get(gt.image_id, [])
@@ -344,7 +366,7 @@ def write_csv(rows: list[dict], out_path: Path) -> None:
         writer.writerows(rows)
 
     ok_rows = [r for r in rows if r.get("status") == "ok"]
-    print(f"共 {len(rows)} 筆 GT，成功配對並算出誤差 {len(ok_rows)} 筆。")
+    print(f"{len(rows)} GT record(s) total, {len(ok_rows)} matched and scored.")
     if ok_rows:
         for key in ("mpjpe_mm", "pa_mpjpe_mm", "beta_mae", "beta_l2"):
             values = [r[key] for r in ok_rows]
@@ -352,7 +374,7 @@ def write_csv(rows: list[dict], out_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 自我測試：不需要任何真實資料集，驗證誤差計算本身邏輯正確
+# Self-test: no real dataset needed, validates the error math itself
 # ---------------------------------------------------------------------------
 
 def self_test() -> None:
@@ -370,43 +392,45 @@ def self_test() -> None:
 
     gt = random_record("dummy_0001", 0, seed_offset=0.0)
 
-    # case 1：預測 = GT，誤差應該是 0（驗證 mpjpe/pa_mpjpe 本身沒有寫錯正負號/單位）
+    # Case 1: prediction == GT, error should be 0 (sanity-checks
+    # mpjpe/pa_mpjpe's sign/units aren't wrong).
     joints_gt = get_joints(smpl_layer, gt, device)
     err_zero_mpjpe = mpjpe(joints_gt, joints_gt)
     err_zero_pa = pa_mpjpe(joints_gt, joints_gt)
-    print(f"[self-test] 預測=GT：mpjpe={err_zero_mpjpe:.6f}mm，"
-          f"pa_mpjpe={err_zero_pa:.6f}mm（應該都 ~0）")
-    assert err_zero_mpjpe < 1e-3, "相同輸入 MPJPE 應該是 0，數學寫錯了"
-    assert err_zero_pa < 1e-3, "相同輸入 PA-MPJPE 應該是 0，數學寫錯了"
+    print(f"[self-test] prediction=GT: mpjpe={err_zero_mpjpe:.6f}mm, "
+          f"pa_mpjpe={err_zero_pa:.6f}mm (both should be ~0)")
+    assert err_zero_mpjpe < 1e-3, "identical input should give MPJPE=0; math is wrong"
+    assert err_zero_pa < 1e-3, "identical input should give PA-MPJPE=0; math is wrong"
 
-    # case 2：預測跟 GT 有一點雜訊，誤差應該 > 0，且 pa_mpjpe <= mpjpe
-    # （Procrustes 對齊後誤差不會比對齊前大，這是這個指標的定義性質）
+    # Case 2: prediction is GT + noise, error should be > 0, and
+    # pa_mpjpe <= mpjpe (Procrustes alignment can only reduce error, by definition).
     pred_noisy = random_record("dummy_0001", 0, seed_offset=0.02)
     pred_noisy.betas = gt.betas + rng.normal(0, 0.3, 10).astype(np.float32)
     joints_pred = get_joints(smpl_layer, pred_noisy, device)
     m = mpjpe(joints_pred, joints_gt)
     pa = pa_mpjpe(joints_pred, joints_gt)
     beta_err = beta_error(pred_noisy.betas, gt.betas)
-    print(f"[self-test] 預測≈GT+雜訊：mpjpe={m:.2f}mm，pa_mpjpe={pa:.2f}mm，"
-          f"beta_mae={beta_err['beta_mae']:.4f}，beta_l2={beta_err['beta_l2']:.4f}")
-    assert m > 0 and pa > 0, "有雜訊卻算出 0 誤差，數學寫錯了"
-    assert pa <= m + 1e-4, "PA-MPJPE 理論上不該大於 MPJPE，數學寫錯了"
+    print(f"[self-test] prediction≈GT+noise: mpjpe={m:.2f}mm, pa_mpjpe={pa:.2f}mm, "
+          f"beta_mae={beta_err['beta_mae']:.4f}, beta_l2={beta_err['beta_l2']:.4f}")
+    assert m > 0 and pa > 0, "noisy input gave 0 error; math is wrong"
+    assert pa <= m + 1e-4, "PA-MPJPE should never exceed MPJPE; math is wrong"
 
-    # case 3：整條 evaluate() 流程（配對 + 寫 CSV）也跑一次，確認資料流通順
+    # Case 3: run the full evaluate() flow (matching + CSV) too, to confirm
+    # the data actually flows end to end.
     pred_by_image = {"dummy_0001": [pred_noisy]}
     rows = evaluate(pred_by_image, [gt], smpl_layer, device)
     out_path = Path("results") / "eval_self_test.csv"
     write_csv(rows, out_path)
-    print(f"[self-test] 全部通過，範例輸出見 {out_path}")
+    print(f"[self-test] all checks passed, sample output at {out_path}")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--self-test", action="store_true",
-                     help="用假資料驗證誤差計算邏輯，不需要任何真實資料集/下載")
+                     help="validate the error math against synthetic data; needs no real dataset/download")
     ap.add_argument("--dataset", type=str, choices=["3dpw", "close-di"])
-    ap.add_argument("--pred_dir", type=str, help="hmr2_estimator.py 的 --out 資料夾")
-    ap.add_argument("--gt_dir", type=str, help="3DPW 的 sequenceFiles/test，或 CloSe-Di 的資料夾")
+    ap.add_argument("--pred_dir", type=str, help="s1_infer.py's --out folder")
+    ap.add_argument("--gt_dir", type=str, help="3DPW's sequenceFiles/test, or a CloSe-Di folder")
     ap.add_argument("--out", type=str, default="results/eval.csv")
     ap.add_argument("--device", type=str, default=None)
     args = ap.parse_args()
@@ -416,8 +440,8 @@ def main() -> None:
         return
 
     if not (args.dataset and args.pred_dir and args.gt_dir):
-        raise SystemExit("正式評估要給 --dataset --pred_dir --gt_dir，"
-                          "或用 --self-test 先驗證邏輯。")
+        raise SystemExit("A real evaluation needs --dataset --pred_dir --gt_dir, "
+                          "or use --self-test to validate the math first.")
 
     device = torch.device(args.device) if args.device else (
         torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")

@@ -1,0 +1,30 @@
+name: 4D-humans
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.10
+  - numpy
+  - pytorch
+  - pytorch-cuda=11.8
+  - torchvision
+  - pip
+  - pip:
+    - pytorch-lightning
+    - smplx==0.1.28
+    - pyrender
+    - opencv-python
+    - yacs
+    - scikit-image
+    - einops
+    - timm
+    - dill
+    - pandas
+    - transformers  # default person detector backend (RT-DETR via HuggingFace)
+    - git+https://github.com/facebookresearch/detectron2  # optional: only needed for --detector-backend detectron2
+    - git+https://github.com/mattloper/chumpy              # required at runtime by smplx's SMPL loader
+
+    # webdataset is imported unconditionally by hmr2/datasets/__init__.py
+    # (a module-load-time dependency of the vendored package, not just training)
+    - webdataset

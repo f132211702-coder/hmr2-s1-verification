@@ -1,10 +1,12 @@
 from setuptools import setup, find_packages
 
-print('Found packages:', find_packages())
+# Package source lives under src/ (vendored 4D-Humans / HMR2.0), so
+# find_packages() must look there instead of the repo root.
 setup(
     description='HMR2 as a package',
     name='hmr2',
-    packages=find_packages(),
+    package_dir={'': 'src'},
+    packages=find_packages(where='src'),
     install_requires=[
         'gdown',
         'numpy',

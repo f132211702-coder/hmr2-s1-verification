@@ -1,4 +1,4 @@
-# 本機開發用 venv，不可移植、不上傳
+# Local dev venv — not portable, never commit
 /hmr2_venv/
 
 # OS
@@ -10,5 +10,19 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 
-# 4D-Humans/ 內部已有自己的 .gitignore（data/、results/、logs*/、checkpoints/、*.pt、*.npy 等），
-# 移除其內部 .git 後這些規則仍然生效，不需要在這裡重複。
+# Downloaded checkpoints, run outputs, sandbox scratch (from the vendored
+# 4D-Humans release's own .gitignore, carried over since it no longer has
+# its own nested .git)
+/results/
+/logs*/
+/sandbox/
+/discord_sandbox/
+/demo_out/
+/outputs/
+/checkpoints/
+/data/
+*.lock
+*.pt
+*.npy
+*.tar
+*.tar.gz
