@@ -17,6 +17,7 @@ setup(
         'pyrender',
         'opencv-python',
         'yacs',
+        'omegaconf',  # needed to unpickle the official checkpoint's hparams, even without detectron2
         'scikit-image',
         'einops',
         'timm',

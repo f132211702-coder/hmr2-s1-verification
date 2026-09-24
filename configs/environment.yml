@@ -16,6 +16,7 @@ dependencies:
     - pyrender
     - opencv-python
     - yacs
+    - omegaconf  # needed to unpickle the official checkpoint's hparams, even with the transformers detector backend
     - scikit-image
     - einops
     - timm
