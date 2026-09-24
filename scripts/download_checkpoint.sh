@@ -12,7 +12,10 @@
 #   bash scripts/download_checkpoint.sh
 set -euo pipefail
 
-CACHE_DIR="${HMR2_CACHE_DIR:-$HOME/.cache/4DHumans}"
+# Must match hmr2/configs/__init__.py's CACHE_DIR_4DHUMANS exactly — that
+# value is hardcoded in the vendored package (not read from an env var), so
+# this can't be made configurable without also patching vendor code.
+CACHE_DIR="$HOME/.cache/4DHumans"
 URL="https://www.cs.utexas.edu/~pavlakos/4dhumans/hmr2_data.tar.gz"
 ARCHIVE="/tmp/hmr2_data.tar.gz"
 

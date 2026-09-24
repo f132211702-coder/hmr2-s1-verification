@@ -14,6 +14,15 @@ The pretrained model is used as-is for inference (S1 of this pipeline: RGB
 image → SMPL parameters); it is **not retrained** here. Vendor's own
 documentation is kept at `src/hmr2/UPSTREAM_README.md` for reference.
 
+## License of this repo's own code
+
+`s1_infer.py`, `tools/`, `eval/`, and `scripts/` are original code written
+for this pipeline stage and are MIT-licensed (Copyright (c) 2026 the
+contributors of this repository), independent of the vendored code's own
+MIT license above.
+
+## Training-only code that could not be removed
+
 `src/hmr2/` still contains training-only code (`models/discriminator.py`,
 `models/losses.py`, `datasets/dataset.py`, `datasets/image_dataset.py`,
 `datasets/mocap_dataset.py`, ...) — these could not be safely deleted:

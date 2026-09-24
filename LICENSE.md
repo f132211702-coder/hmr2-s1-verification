@@ -1,5 +1,10 @@
 MIT License
 
+This license applies to the vendored 4D-Humans / HMR2.0 code under
+`src/hmr2/` and `src/vendor_demos/` (see NOTICE.md for provenance). The
+rest of this repository (`s1_infer.py`, `tools/`, `eval/`, `scripts/`) is
+also MIT-licensed, under a separate copyright — see NOTICE.md.
+
 Copyright (c) 2023 UC Regents, Shubham Goel
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
