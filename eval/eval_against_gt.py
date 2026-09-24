@@ -3,15 +3,15 @@
 ground-truth SMPL parameters shipped with a dataset, and report MPJPE /
 PA-MPJPE (joint/pose error) and beta error (shape error).
 
-Status: 3DPW and CloSe-Di haven't been downloaded yet, so this is a
+Status (updated 2026-09-25): 3DPW is downloaded and `load_3dpw_gt()` has
+been verified against a real file (`sequenceFiles/test/outdoors_fencing_01.pkl`
+— see that function's docstring for exactly what was checked). CloSe-Di is
+still not downloaded, so `load_close_di_gt()` remains an unverified
 skeleton. The error math (MPJPE / PA-MPJPE / Procrustes alignment / beta
-error) is pure math and has already been validated against synthetic data
-(see --self-test). The GT loaders (load_3dpw_gt / load_close_di_gt) use
-field names taken from public documentation and have **not** been verified
-against real files yet — look for the TODO markers before relying on them.
+error) is pure math and was validated against synthetic data separately
+(see --self-test).
 
-Known issues this skeleton does not solve (nothing to do until real data is
-available):
+Known issues, not yet solved:
     - 3DPW's GT is computed with a gendered SMPL model (male/female); HMR2
       only outputs neutral-SMPL parameters, and only SMPL_NEUTRAL.pkl is
       available locally. Comparing joints computed from different body
@@ -22,14 +22,6 @@ available):
     - A 3DPW clip can have more than one person; match_prediction() only
       does bbox-IoU matching so far and hasn't been tested on a multi-person
       case.
-    - The assumed 3DPW frame filename convention (image_%05d.jpg per
-      sequence) is a common one from the official release scripts, not
-      verified against files on this machine — adjust load_3dpw_gt()'s
-      image_id construction if it doesn't match reality. It must stay in
-      sync with how s1_infer.py's --img_folder mode derives image_id from
-      a file's path relative to the given folder (both replace "/" with
-      "__", since 3DPW restarts frame numbering inside every sequence
-      subfolder).
 
 Usage (skeleton self-test, no real dataset or GPU needed):
     python eval/eval_against_gt.py --self-test
@@ -228,28 +220,32 @@ def load_predictions(pred_dir: Path) -> dict[str, list[PoseRecord]]:
 
 
 # ---------------------------------------------------------------------------
-# GT loading — TODO: not yet verified against real data, see module docstring
+# GT loading
 # ---------------------------------------------------------------------------
 
 def load_3dpw_gt(seq_pkl_path: Path) -> list[PoseRecord]:
     """Load one 3DPW sequence's GT
     (`sequenceFiles/{train,validation,test}/*.pkl`).
 
-    TODO not yet verified against real data: field names (poses/betas/trans/
-    jointPositions/genders/campose_valid) follow the standard format
-    documented in the paper and release scripts, but haven't been confirmed
-    against an actual .pkl file. Once the data is downloaded, the first
-    step should be:
-        import pickle
-        d = pickle.load(open(seq_pkl_path, "rb"), encoding="latin1")
-        print(d.keys())
-    and adjust this function if the real fields differ.
+    Verified against a real file (`sequenceFiles/test/outdoors_fencing_01.pkl`
+    on 2026-09-25): the fields used here (poses/betas/jointPositions/
+    campose_valid) exist with the expected shapes. `betas` is (300,) per
+    person, not (10,) — HMR2 only outputs 10, so we keep just the first 10
+    (SMPL's shape space is nested/PCA-ordered, so this is a valid truncation,
+    not an arbitrary slice).
 
-    image_id currently assumes the frame-extraction convention
-    `<sequence_name>__image_%05d` (matching s1_infer.py's --img_folder
-    naming, see its module docstring) — this needs to match whatever
-    load_predictions() used as its image_id, or predictions won't match up
-    with GT for the same frame.
+    image_id: uses the pose array's own frame index (0..num_frames-1), NOT
+    the `img_frame_ids` field. `img_frame_ids` records each pose's frame
+    number in the original 60Hz video (e.g. [0, 2, 4, 6, ...] — 3DPW's pose
+    annotations are downsampled from 60Hz), but the *shipped* `imageFiles/`
+    directory is already renumbered to match that downsampled sequence
+    (verified: outdoors_fencing_01 has exactly 942 poses and exactly 942
+    images named image_00000.jpg..image_00941.jpg, contiguous). So
+    `poses[i]` corresponds to `image_{i:05d}.jpg`, and `img_frame_ids` isn't
+    needed for anything here. The "__" (not "/") separator matches
+    s1_infer.py's --img_folder naming (see its module docstring), which
+    replaces path separators the same way to avoid different sequences'
+    identically-numbered frames colliding.
     """
     import pickle
 
@@ -262,7 +258,7 @@ def load_3dpw_gt(seq_pkl_path: Path) -> list[PoseRecord]:
     num_people = len(data["poses"])
     for person_id in range(num_people):
         poses = data["poses"][person_id]              # (num_frames, 72)
-        betas = data["betas"][person_id][:10]           # (10,) or (300,); keep only the first 10 to match HMR2
+        betas = data["betas"][person_id][:10]           # (300,) -> keep first 10 to match HMR2
         joint_positions = data.get("jointPositions", [None] * num_people)[person_id]  # (num_frames, 24*3) or None
         valid = data.get("campose_valid", [None] * num_people)[person_id]
 
