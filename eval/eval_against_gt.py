@@ -205,7 +205,11 @@ def load_predictions(pred_dir: Path) -> dict[str, list[PoseRecord]]:
     by_image: dict[str, list[PoseRecord]] = {}
     for npz_path in sorted(pred_dir.glob("*_smpl_params.npz")):
         stem = npz_path.stem  # "<image_id>_<person_id>_smpl_params"
-        image_id, person_id = stem.rsplit("_", 2)[0], stem.rsplit("_", 2)[1]
+        # "smpl_params" itself contains an underscore, so this has to split
+        # off 3 trailing "_"-parts ("<person_id>", "smpl", "params"), not 2
+        # — splitting off only 2 cuts between "smpl" and "params" instead
+        # and misreads "smpl" as the person_id.
+        image_id, person_id = stem.rsplit("_", 3)[0], stem.rsplit("_", 3)[1]
         data = np.load(npz_path)
         record = PoseRecord(
             image_id=image_id,
