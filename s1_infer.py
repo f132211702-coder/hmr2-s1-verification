@@ -312,6 +312,14 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--img", type=str, help="path to a single image")
     ap.add_argument("--img_folder", type=str, help="batch mode: process every *.jpg/*.png in this folder")
+    ap.add_argument("--id-prefix", type=str, default="",
+                     help="prepended to every image_id in this run (output filenames become "
+                          "<prefix><image_id>_<person_id>_smpl_params.npz). Use this when batching "
+                          "a dataset one subfolder at a time into the same --out — e.g. "
+                          "--id-prefix '<sequence_name>__' — so different calls' identically-named "
+                          "images (image_00000.jpg in every 3DPW sequence, for example) don't "
+                          "overwrite each other. Not needed if --img_folder itself contains the "
+                          "subfolders directly (its own relative-path-based naming already handles that).")
     ap.add_argument("--out", type=str, default="results/s1_raw")
     ap.add_argument("--checkpoint", type=str, default=None)
     ap.add_argument("--detector-backend", type=str, default="transformers",
@@ -339,13 +347,13 @@ def main() -> None:
     if args.img:
         p = Path(args.img)
         img_paths.append(p)
-        image_ids.append(p.stem)
+        image_ids.append(args.id_prefix + p.stem)
     if args.img_folder:
         folder = Path(args.img_folder)
         found = sorted(folder.rglob("*.jpg")) + sorted(folder.rglob("*.png"))
         img_paths.extend(found)
         image_ids.extend(
-            p.relative_to(folder).with_suffix("").as_posix().replace("/", "__")
+            args.id_prefix + p.relative_to(folder).with_suffix("").as_posix().replace("/", "__")
             for p in found
         )
 
