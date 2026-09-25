@@ -251,6 +251,9 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--img", type=str, required=True)
     ap.add_argument("--pred_dir", type=str, required=True, help="s1_infer.py's --out folder")
+    ap.add_argument("--id-prefix", type=str, default="",
+                     help="must match whatever --id-prefix was passed to s1_infer.py when producing "
+                          "--pred_dir (e.g. '<sequence_name>__'), so this can find the right npz files.")
     ap.add_argument("--out", type=str, default="results/s1_viz")
     ap.add_argument("--no-boxes", action="store_true")
     ap.add_argument("--no-mesh-overlay", action="store_true")
@@ -264,20 +267,26 @@ def main() -> None:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Must match the image_id s1_infer.py actually saved its npz files
+    # under — if that run used --id-prefix (e.g. batching a dataset one
+    # sequence at a time), this has to be given the same prefix, or
+    # load_predictions() won't find anything.
+    image_id = args.id_prefix + img_path.stem
+
     img_bgr = cv2.imread(str(img_path))
     if img_bgr is None:
         raise SystemExit(f"Could not read image {img_path}")
 
-    people = load_predictions(pred_dir, img_path.stem)
+    people = load_predictions(pred_dir, image_id)
     if not people:
-        raise SystemExit(f"No predictions found in {pred_dir} for {img_path.stem}")
+        raise SystemExit(f"No predictions found in {pred_dir} for {image_id}")
     print(f"{img_path.name}: {len(people)} prediction(s) loaded from {pred_dir}")
 
     if not args.no_boxes:
-        cv2.imwrite(str(out_dir / f"{img_path.stem}_boxes.jpg"), draw_boxes(img_bgr, people))
+        cv2.imwrite(str(out_dir / f"{image_id}_boxes.jpg"), draw_boxes(img_bgr, people))
 
     if not args.no_mesh_overlay:
-        cv2.imwrite(str(out_dir / f"{img_path.stem}_mesh_overlay.jpg"), draw_mesh_overlay(img_bgr, people))
+        cv2.imwrite(str(out_dir / f"{image_id}_mesh_overlay.jpg"), draw_mesh_overlay(img_bgr, people))
 
     faces = None
     if not args.no_mesh_solid or not args.no_render or not args.no_obj:
@@ -286,15 +295,15 @@ def main() -> None:
     if not args.no_mesh_solid:
         solid = render_mesh_overlay_solid(img_bgr, people, faces)
         divider = np.full((img_bgr.shape[0], 4, 3), 255, dtype=np.uint8)
-        cv2.imwrite(str(out_dir / f"{img_path.stem}_mesh_solid.jpg"), cv2.hconcat([img_bgr, divider, solid]))
+        cv2.imwrite(str(out_dir / f"{image_id}_mesh_solid.jpg"), cv2.hconcat([img_bgr, divider, solid]))
 
     for p in people:
         if not args.no_render:
             render_mesh_shaded(p["pred_vertices"], faces,
-                                out_dir / f"{img_path.stem}_{p['person_id']}_render.png")
+                                out_dir / f"{image_id}_{p['person_id']}_render.png")
         if not args.no_obj:
             write_obj(p["pred_vertices"], faces,
-                      out_dir / f"{img_path.stem}_{p['person_id']}_smpl_params.obj")
+                      out_dir / f"{image_id}_{p['person_id']}_smpl_params.obj")
 
     print(f"Done. Output written to {out_dir}")
 
