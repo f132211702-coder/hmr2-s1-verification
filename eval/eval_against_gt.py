@@ -110,7 +110,18 @@ def build_smpl_layer(device: "torch.device" = None, gender: str = "neutral"):
 
 def get_joints(smpl_layer, record: PoseRecord, device: "torch.device" = None) -> np.ndarray:
     """Prefer the dataset's own precomputed joints_3d if present; otherwise
-    compute them via an SMPL forward pass."""
+    compute them via an SMPL forward pass.
+
+    smplx's SMPL forward returns 45 joints by default (the 24 standard SMPL
+    body joints, plus 21 extra keypoints such as fingertips/face landmarks
+    it appends after them) — but datasets that ship their own joints_3d
+    (e.g. 3DPW's jointPositions) only have the 24 standard ones. Slicing to
+    [:24] keeps just the standard joints so both sides are always
+    comparable, regardless of which one supplied joints_3d directly.
+    --self-test didn't catch this because it never sets joints_3d on either
+    side, so both went through this SMPL-forward path and matched by
+    coincidence (45 == 45).
+    """
     if record.joints_3d is not None:
         return record.joints_3d
 
@@ -125,7 +136,7 @@ def get_joints(smpl_layer, record: PoseRecord, device: "torch.device" = None) ->
 
     with torch.no_grad():
         out = smpl_layer(betas=betas_t, body_pose=body_pose_t, global_orient=global_orient_t)
-    return out.joints[0].detach().cpu().numpy()
+    return out.joints[0, :24].detach().cpu().numpy()
 
 
 # ---------------------------------------------------------------------------
