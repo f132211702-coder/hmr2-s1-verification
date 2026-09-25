@@ -23,6 +23,18 @@ Known issues, not yet solved:
       does bbox-IoU matching so far and hasn't been tested on a multi-person
       case.
 
+Interpreting the numbers (learned from the first real 3DPW-TEST run,
+2026-09-25, 35508/35515 matched): `mpjpe_mm` can come out huge (hundreds of
+mm) on 3DPW and this is *expected*, not a bug — 3DPW's jointPositions are
+in world coordinates, while HMR2's predicted pose is in a camera-centric
+local frame, so the two sides' global orientation isn't aligned. mpjpe()
+only removes translation (recenters on the pelvis); it does nothing about
+that rotation mismatch, so the raw distance blows up. pa_mpjpe() also
+aligns rotation and scale, which corrects this, so it's the number that's
+actually comparable to what papers report for 3DPW (the official HMR2.0
+checkpoint's published PA-MPJPE is 44.4mm) — treat pa_mpjpe_mm as the
+primary metric here, and don't be alarmed by a large mpjpe_mm on its own.
+
 Usage (skeleton self-test, no real dataset or GPU needed):
     python eval/eval_against_gt.py --self-test
 
@@ -169,7 +181,13 @@ def compute_similarity_transform(source: np.ndarray, target: np.ndarray) -> np.n
 def mpjpe(pred_joints: np.ndarray, gt_joints: np.ndarray, pelvis_idx: int = 0) -> float:
     """Mean Per-Joint Position Error, in mm (assumes meter inputs).
     Root-relative: both sides are re-centered on the pelvis joint first, so
-    this only reflects relative-pose error, not overall translation."""
+    this only reflects relative-pose error, not overall translation — but
+    NOT rotation. On a dataset like 3DPW, whose GT joints are in world
+    coordinates (unlike HMR2's camera-centric prediction frame), this can
+    come out huge (hundreds of mm) purely from that unaligned global
+    rotation, without HMR2's pose estimate actually being that wrong — see
+    pa_mpjpe() below, and this module's docstring, before treating a large
+    value here as a bug."""
     pred = pred_joints - pred_joints[pelvis_idx:pelvis_idx + 1]
     gt = gt_joints - gt_joints[pelvis_idx:pelvis_idx + 1]
     return float(np.linalg.norm(pred - gt, axis=-1).mean() * 1000)
