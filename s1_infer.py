@@ -170,6 +170,12 @@ class _GenderClassifier:
         # for the same card ("No DNN support for stream" on the first
         # call). One small face crop per person is trivially fast on CPU.
         # This only affects TensorFlow; PyTorch's GPU use is unchanged.
+        #
+        # deepface must be imported BEFORE tensorflow: on import it switches
+        # TensorFlow to the legacy tf-keras. Importing tensorflow first
+        # loads Keras 3 instead, and retinaface's model builder then fails
+        # with "A KerasTensor cannot be used as input to a TensorFlow function".
+        from deepface import DeepFace  # noqa: F401
         import tensorflow as tf
         tf.config.set_visible_devices([], "GPU")
 
