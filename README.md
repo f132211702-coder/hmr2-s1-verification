@@ -96,7 +96,7 @@ python s1_infer.py --img_folder /path/to/images --out results/s1_raw
 Gender-aware skeleton proportions (optional, for downstream display):
 
 ```bash
-pip install deepface   # or: pip install -e '.[gender]'
+pip install deepface tf-keras   # or: pip install -e '.[gender]'  (tf-keras is needed with TensorFlow>=2.16)
 # also needs SMPL_MALE.pkl / SMPL_FEMALE.pkl at ~/.cache/4DHumans/data/smpl/
 # (registration required at https://smpl.is.tue.mpg.de/, same as SMPL_NEUTRAL.pkl)
 

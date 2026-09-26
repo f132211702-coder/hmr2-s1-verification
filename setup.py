@@ -33,6 +33,7 @@ setup(
         # since it pulls in TensorFlow, which nothing else here needs.
         'gender': [
             'deepface',
+            'tf-keras',  # deepface refuses to import under tensorflow>=2.16 (Keras 3) without it
         ],
     },
 )
