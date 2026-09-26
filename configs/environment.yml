@@ -33,4 +33,4 @@ dependencies:
 
     # deepface is NOT installed here on purpose (it pulls in TensorFlow
     # alongside PyTorch). Only needed for s1_infer.py's optional
-    # --gender-aware flag: `pip install deepface` or `pip install -e '.[gender]'`
+    # --gender-aware flag: `pip install deepface tf-keras` or `pip install -e '.[gender]'`

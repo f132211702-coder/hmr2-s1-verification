@@ -127,7 +127,8 @@ if "pyrender" not in _sys.modules:
     _sys.modules["pyrender"] = _pyrender_stub
 
 
-def parse_deepface_gender(analysis: dict, min_confidence: float = 60.0) -> str | None:
+def parse_deepface_gender(analysis: dict, min_confidence: float = 60.0,
+                          min_face_confidence: float = 0.9) -> str | None:
     """Pure parsing logic, kept separate from any DeepFace/model call so it
     can be validated without those dependencies installed (see --self-test).
 
@@ -136,7 +137,14 @@ def parse_deepface_gender(analysis: dict, min_confidence: float = 60.0) -> str |
     to sum to exactly 100). Picks whichever is higher and maps it to
     "male"/"female", but only if it clears min_confidence -- otherwise
     returns None so the caller falls back to the neutral SMPL model rather
-    than trusting a near coin-flip classification."""
+    than trusting a near coin-flip classification.
+
+    Also checks 'face_confidence': with enforce_detection=False, DeepFace
+    doesn't raise when it finds no face, it just treats the whole image as
+    the "face" (face_confidence 0) and classifies that, which is
+    meaningless. Such results are rejected here."""
+    if analysis.get("face_confidence", 1.0) < min_face_confidence:
+        return None
     gender_scores = analysis.get("gender") or {}
     if not gender_scores:
         return None
@@ -154,19 +162,25 @@ class _GenderClassifier:
     person's predicted pose+shape with -- see this file's module docstring
     for why that's a narrower fix than it might sound."""
 
-    def __init__(self, min_confidence: float = 60.0):
+    def __init__(self, min_confidence: float = 60.0, detector_backend: str = "retinaface"):
         self.min_confidence = min_confidence
+        # DeepFace's default "opencv" (Haar cascade) backend needs
+        # cv2/data/haarcascade_frontalface_default.xml, which pip's opencv
+        # build here doesn't ship -- it fails on every call. retinaface
+        # ships with deepface's own dependencies and is also more accurate.
+        self.detector_backend = detector_backend
 
     def __call__(self, person_crop_bgr: np.ndarray) -> str | None:
         from deepface import DeepFace
 
-        try:
-            analyses = DeepFace.analyze(
-                person_crop_bgr, actions=["gender"],
-                enforce_detection=False, silent=True,
-            )
-        except Exception:
-            return None
+        # No try/except on purpose: a swallowed error here silently turns
+        # every result into "neutral", which is indistinguishable from
+        # "no confident face" and hides real setup problems.
+        analyses = DeepFace.analyze(
+            person_crop_bgr, actions=["gender"],
+            detector_backend=self.detector_backend,
+            enforce_detection=False, silent=True,
+        )
         analysis = analyses[0] if isinstance(analyses, list) else analyses
         return parse_deepface_gender(analysis, self.min_confidence)
 
@@ -450,7 +464,12 @@ def self_test() -> None:
     confident_woman = {"gender": {"Man": 3.5, "Woman": 96.5}}
     ambiguous = {"gender": {"Man": 54.0, "Woman": 46.0}}
     missing = {}
+    no_face_found = {"gender": {"Man": 99.0, "Woman": 1.0}, "face_confidence": 0.0}
+    clear_face = {"gender": {"Man": 96.1, "Woman": 3.9}, "face_confidence": 1.0}
 
+    assert parse_deepface_gender(no_face_found) is None, \
+        "a confident-looking gender score with face_confidence 0 means no face was found; must reject"
+    assert parse_deepface_gender(clear_face) == "male", "clear face + confident score should pass"
     assert parse_deepface_gender(confident_man) == "male", "confident Man should map to 'male'"
     assert parse_deepface_gender(confident_woman) == "female", "confident Woman should map to 'female'"
     assert parse_deepface_gender(ambiguous, min_confidence=60.0) is None, \
