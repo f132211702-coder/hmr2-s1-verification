@@ -469,6 +469,14 @@ def main() -> None:
     ap.add_argument("--gt_dir", type=str, help="3DPW's sequenceFiles/test, or a CloSe-Di folder")
     ap.add_argument("--out", type=str, default="results/eval.csv")
     ap.add_argument("--device", type=str, default=None)
+    ap.add_argument("--smpl-gender", type=str, default="neutral",
+                     choices=["neutral", "male", "female"],
+                     help="which SMPL model to turn PREDICTED betas+pose into joints with. "
+                          "3DPW's GT joints come from gendered models (the whole 3DPW test "
+                          "split is male), so 'male' removes the neutral-vs-gendered skeleton "
+                          "mismatch from pa_mpjpe. Needs SMPL_MALE.pkl/SMPL_FEMALE.pkl next to "
+                          "SMPL_NEUTRAL.pkl. Does not affect beta_l2/beta_mae (compared "
+                          "directly as coefficients).")
     args = ap.parse_args()
 
     if args.self_test:
@@ -482,7 +490,7 @@ def main() -> None:
     device = torch.device(args.device) if args.device else (
         torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     )
-    smpl_layer = build_smpl_layer(device=device, gender="neutral")
+    smpl_layer = build_smpl_layer(device=device, gender=args.smpl_gender)
     pred_by_image = load_predictions(Path(args.pred_dir))
 
     gt_dir = Path(args.gt_dir)
