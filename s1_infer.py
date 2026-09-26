@@ -17,6 +17,34 @@ script's output instead of adding flags here.
         bbox           (4,)         [x1, y1, x2, y2], full-image pixel coords
         scaled_focal_length  ()     scalar, needed to re-project pred_vertices
         pred_vertices  (6890, 3)    SMPL mesh vertices (model space)
+        gender         str          "male"/"female"/"neutral" -- only present
+                                     when --gender-aware is passed; see below
+
+Optional: --gender-aware (off by default)
+    HMR2 always regresses `betas` in neutral-SMPL space, regardless of this
+    flag -- that value never changes. What this flag changes is which
+    *skeleton* `pred_vertices` is rendered with: by default it's HMR2's own
+    (neutral) mesh; with this flag, each detected person's crop is passed
+    through a best-effort face-based gender classifier (DeepFace), and if
+    it's confident AND the matching gendered SMPL model is available
+    locally, pred_vertices is recomputed through that model instead, for
+    more anatomically correct proportions in downstream display (e.g. S2-S4
+    virtual try-on). Falls back to the neutral mesh whenever the face isn't
+    confidently classified or the gendered model file is missing.
+
+    This does NOT address the "shape estimation collapses toward the
+    average body" finding from this project's S1 evaluation (see
+    eval/verify_neutral_gender_bias.py and the evaluation report) -- that's
+    about the *betas values themselves* carrying little person-specific
+    signal, which choosing a different skeleton to render them with cannot
+    fix. This flag only changes proportions/rendering, not the underlying
+    shape estimate.
+
+    Needs: `pip install deepface` (pulls in TensorFlow; not a default
+    dependency of this repo, see setup.py's `gender` extra) and
+    SMPL_MALE.pkl / SMPL_FEMALE.pkl placed next to SMPL_NEUTRAL.pkl
+    (registration required at https://smpl.is.tue.mpg.de/, same as the
+    neutral model).
 
 Pipeline: a person detector finds bounding boxes, then HMR2 (pure
 ViT + transformer decoder, no dependency on the detector backend) regresses
@@ -97,6 +125,68 @@ if "pyrender" not in _sys.modules:
     _pyrender_stub = _types.ModuleType("pyrender")
     _pyrender_stub.__getattr__ = _pyrender_stub_getattr
     _sys.modules["pyrender"] = _pyrender_stub
+
+
+def parse_deepface_gender(analysis: dict, min_confidence: float = 60.0) -> str | None:
+    """Pure parsing logic, kept separate from any DeepFace/model call so it
+    can be validated without those dependencies installed (see --self-test).
+
+    DeepFace.analyze(actions=["gender"]) returns a dict with a 'gender'
+    sub-dict like {'Woman': 12.3, 'Man': 87.7} (percentages, not guaranteed
+    to sum to exactly 100). Picks whichever is higher and maps it to
+    "male"/"female", but only if it clears min_confidence -- otherwise
+    returns None so the caller falls back to the neutral SMPL model rather
+    than trusting a near coin-flip classification."""
+    gender_scores = analysis.get("gender") or {}
+    if not gender_scores:
+        return None
+    label, score = max(gender_scores.items(), key=lambda kv: kv[1])
+    if score < min_confidence:
+        return None
+    return {"Man": "male", "Woman": "female"}.get(label)
+
+
+class _GenderClassifier:
+    """Best-effort gender classification from a person crop, using DeepFace
+    (a pretrained face-attribute model -- no training or GPU needed, but
+    pulls in TensorFlow; only imported if --gender-aware is actually
+    passed). Exists purely to pick which *skeleton proportions* to render a
+    person's predicted pose+shape with -- see this file's module docstring
+    for why that's a narrower fix than it might sound."""
+
+    def __init__(self, min_confidence: float = 60.0):
+        self.min_confidence = min_confidence
+
+    def __call__(self, person_crop_bgr: np.ndarray) -> str | None:
+        from deepface import DeepFace
+
+        try:
+            analyses = DeepFace.analyze(
+                person_crop_bgr, actions=["gender"],
+                enforce_detection=False, silent=True,
+            )
+        except Exception:
+            return None
+        analysis = analyses[0] if isinstance(analyses, list) else analyses
+        return parse_deepface_gender(analysis, self.min_confidence)
+
+
+def _load_gendered_smpl_layer(gender: str, device: "torch.device"):
+    """Same loading convention as eval/eval_against_gt.py's
+    build_smpl_layer() -- SMPL_MALE.pkl/SMPL_FEMALE.pkl must be downloaded
+    separately and placed next to SMPL_NEUTRAL.pkl."""
+    import smplx
+    from hmr2.configs import CACHE_DIR_4DHUMANS
+
+    filename = {"male": "SMPL_MALE.pkl", "female": "SMPL_FEMALE.pkl"}[gender]
+    smpl_path = Path(CACHE_DIR_4DHUMANS) / "data" / "smpl" / filename
+    if not smpl_path.exists():
+        raise FileNotFoundError(
+            f"{smpl_path} does not exist. --gender-aware needs the gendered SMPL "
+            f"models downloaded separately from https://smpl.is.tue.mpg.de/ and "
+            f"placed at that path (same folder as SMPL_NEUTRAL.pkl)."
+        )
+    return smplx.SMPLLayer(model_path=str(smpl_path), num_betas=10).to(device).eval()
 
 
 class _CPUPredictorLazy:
@@ -209,13 +299,20 @@ class HMR2Estimator:
                  detector_model_name: str = "PekingU/rtdetr_r50vd",
                  detector_weights: str | None = None,
                  score_thresh: float = 0.5, device: str | None = None,
-                 batch_size: int = 8):
+                 batch_size: int = 8,
+                 gender_aware: bool = False,
+                 gender_min_confidence: float = 60.0):
         from hmr2.configs import CACHE_DIR_4DHUMANS
         from hmr2.models import download_models, load_hmr2, DEFAULT_CHECKPOINT
 
         assert detector_backend in ("transformers", "detectron2"), detector_backend
         self.detector_backend = detector_backend
         self.batch_size = batch_size
+
+        self.gender_aware = gender_aware
+        self._gender_classifier = _GenderClassifier(gender_min_confidence) if gender_aware else None
+        self._gendered_smpl_layers: dict[str, "torch.nn.Module"] = {}
+        self._gendered_smpl_load_failed: set[str] = set()
 
         self.device = torch.device(device) if device else (
             torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -244,6 +341,43 @@ class HMR2Estimator:
             det_cfg.model.roi_heads.box_predictor.test_score_thresh = score_thresh
             det_cfg.model.roi_heads.box_predictor.test_nms_thresh = 0.4
             self.detector = _CPUPredictorLazy(det_cfg, self.device)
+
+    def _apply_gender_awareness(self, img_bgr: np.ndarray, person: dict) -> str:
+        """Best-effort: crop the person, classify gender, and if a confident
+        label + its gendered SMPL model are both available, replace
+        person["pred_vertices"] (HMR2's own neutral-model mesh) with a mesh
+        computed via that gendered model instead -- same betas/pose values,
+        different skeleton proportions. Returns the label actually applied
+        ("male"/"female"/"neutral")."""
+        x1, y1, x2, y2 = [int(round(v)) for v in person["bbox"]]
+        h, w = img_bgr.shape[:2]
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(w, x2), min(h, y2)
+        if x2 <= x1 or y2 <= y1:
+            return "neutral"
+        crop = img_bgr[y1:y2, x1:x2]
+
+        label = self._gender_classifier(crop)
+        if label is None or label in self._gendered_smpl_load_failed:
+            return "neutral"
+
+        layer = self._gendered_smpl_layers.get(label)
+        if layer is None:
+            try:
+                layer = _load_gendered_smpl_layer(label, self.device)
+            except FileNotFoundError as e:
+                print(f"[warn] {e}")
+                self._gendered_smpl_load_failed.add(label)
+                return "neutral"
+            self._gendered_smpl_layers[label] = layer
+
+        betas_t = torch.tensor(person["betas"], dtype=torch.float32, device=self.device)[None]
+        body_pose_t = torch.tensor(person["body_pose"], dtype=torch.float32, device=self.device)[None]
+        global_orient_t = torch.tensor(person["global_orient"], dtype=torch.float32, device=self.device)[None]
+        with torch.no_grad():
+            gendered_out = layer(betas=betas_t, body_pose=body_pose_t, global_orient=global_orient_t)
+        person["pred_vertices"] = gendered_out.vertices[0].detach().cpu().numpy()
+        return label
 
     def estimate(self, img_bgr: np.ndarray, score_thresh: float = 0.5) -> list[dict]:
         """Input one BGR numpy array (as returned by cv2.imread). Returns the
@@ -293,7 +427,7 @@ class HMR2Estimator:
                 # ViTDetDataset assigns (see hmr2/datasets/vitdet_dataset.py:
                 # self.personid = np.arange(len(boxes))), so use that instead.
                 person_idx = int(batch["personid"][n])
-                results.append({
+                person_result = {
                     "person_id": person_idx,
                     "betas": out["pred_smpl_params"]["betas"][n].detach().cpu().numpy(),
                     "body_pose": out["pred_smpl_params"]["body_pose"][n].detach().cpu().numpy(),
@@ -302,14 +436,40 @@ class HMR2Estimator:
                     "scaled_focal_length": float(scaled_focal_length),
                     "pred_vertices": out["pred_vertices"][n].detach().cpu().numpy(),
                     "bbox": boxes[person_idx],
-                })
+                }
+                if self.gender_aware:
+                    person_result["gender"] = self._apply_gender_awareness(img_bgr, person_result)
+                results.append(person_result)
         return results
+
+
+def self_test() -> None:
+    """No DeepFace/model download needed -- validates only the pure
+    parse_deepface_gender() logic against synthetic analysis dicts."""
+    confident_man = {"gender": {"Man": 92.0, "Woman": 8.0}}
+    confident_woman = {"gender": {"Man": 3.5, "Woman": 96.5}}
+    ambiguous = {"gender": {"Man": 54.0, "Woman": 46.0}}
+    missing = {}
+
+    assert parse_deepface_gender(confident_man) == "male", "confident Man should map to 'male'"
+    assert parse_deepface_gender(confident_woman) == "female", "confident Woman should map to 'female'"
+    assert parse_deepface_gender(ambiguous, min_confidence=60.0) is None, \
+        "a 54/46 split is below a 60%% confidence threshold; should refuse rather than guess"
+    assert parse_deepface_gender(ambiguous, min_confidence=50.0) == "male", \
+        "the same split should pass a lower threshold"
+    assert parse_deepface_gender(missing) is None, "no 'gender' key should return None, not crash"
+
+    print("[self-test] parse_deepface_gender: all checks passed "
+          "(this only validates the label-parsing logic; it does not call DeepFace or SMPL).")
 
 
 def main() -> None:
     import cv2
 
     ap = argparse.ArgumentParser()
+    ap.add_argument("--self-test", action="store_true",
+                     help="validate parse_deepface_gender()'s logic against synthetic input; "
+                          "needs no image, model, or DeepFace install")
     ap.add_argument("--img", type=str, help="path to a single image")
     ap.add_argument("--img_folder", type=str, help="batch mode: process every *.jpg/*.png in this folder")
     ap.add_argument("--id-prefix", type=str, default="",
@@ -331,7 +491,20 @@ def main() -> None:
     ap.add_argument("--score-thresh", type=float, default=0.5)
     ap.add_argument("--batch-size", type=int, default=8,
                      help="HMR2 inference batch size; increase on a GPU for throughput.")
+    ap.add_argument("--gender-aware", action="store_true",
+                     help="classify each detected person's gender (DeepFace) and render "
+                          "pred_vertices with the matching gendered SMPL model instead of "
+                          "neutral, when confident. See this file's module docstring for "
+                          "what this does and does NOT fix. Needs `pip install deepface` "
+                          "and SMPL_MALE.pkl/SMPL_FEMALE.pkl downloaded separately.")
+    ap.add_argument("--gender-min-confidence", type=float, default=60.0,
+                     help="minimum DeepFace confidence (%%) to trust a gender label; "
+                          "below this, falls back to the neutral mesh")
     args = ap.parse_args()
+
+    if args.self_test:
+        self_test()
+        return
 
     if not args.img and not args.img_folder:
         raise SystemExit("Provide either --img or --img_folder")
@@ -367,7 +540,9 @@ def main() -> None:
                          detector_model_name=args.detector_model,
                          detector_weights=args.detector_weights,
                          score_thresh=args.score_thresh,
-                         batch_size=args.batch_size)
+                         batch_size=args.batch_size,
+                         gender_aware=args.gender_aware,
+                         gender_min_confidence=args.gender_min_confidence)
 
     for img_path, image_id in zip(img_paths, image_ids):
         img_bgr = cv2.imread(str(img_path))
@@ -381,7 +556,7 @@ def main() -> None:
             np.savez(npz_path, betas=p["betas"], body_pose=p["body_pose"],
                      global_orient=p["global_orient"], cam_t=p["cam_t"],
                      bbox=p["bbox"], scaled_focal_length=p["scaled_focal_length"],
-                     pred_vertices=p["pred_vertices"])
+                     pred_vertices=p["pred_vertices"], gender=p.get("gender", "neutral"))
 
     print(f"Done. Output written to {out_dir}")
 

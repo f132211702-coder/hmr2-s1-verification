@@ -30,3 +30,7 @@ dependencies:
     # webdataset is imported unconditionally by hmr2/datasets/__init__.py
     # (a module-load-time dependency of the vendored package, not just training)
     - webdataset
+
+    # deepface is NOT installed here on purpose (it pulls in TensorFlow
+    # alongside PyTorch). Only needed for s1_infer.py's optional
+    # --gender-aware flag: `pip install deepface` or `pip install -e '.[gender]'`

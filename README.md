@@ -25,7 +25,7 @@ output downstream.
 | | |
 |---|---|
 | **Input** | one RGB image (a photo of a person) |
-| **Output** | per detected person: `betas` (10,), `body_pose` (23,3,3), `global_orient` (1,3,3), `cam_t` (3,) — the SMPL shape/pose/camera parameters |
+| **Output** | per detected person: `betas` (10,), `body_pose` (23,3,3), `global_orient` (1,3,3), `cam_t` (3,) — the SMPL shape/pose/camera parameters; optionally `gender` — see Features |
 | **Model** | the official pretrained **HMR 2.0** checkpoint ([4D-Humans](https://github.com/shubham-goel/4D-Humans), ICCV 2023) — used as-is, **not retrained**. See [NOTICE.md](NOTICE.md) |
 
 Everything else in this repo exists to serve that one input→output contract.
@@ -35,6 +35,7 @@ specific estimate or extending the pipeline.
 ## Features
 
 - **`s1_infer.py`** — single-image or batch-folder SMPL estimation, as a CLI or an importable `HMR2Estimator` class
+  - optional `--gender-aware`: classifies each detected person's gender (DeepFace) and renders `pred_vertices` with the matching gendered SMPL model instead of neutral, for more anatomically correct proportions in downstream display. Does **not** change the predicted `betas` values themselves, and does not fix HMR2's tendency to regress shape toward the average body — see the module docstring and the S1 evaluation report.
 - **`tools/visualize.py`** — render detection boxes / mesh overlays / `.obj` exports from a saved result, without reloading the model
 - **`tools/refine_leg_pose.py`** — optional ViTPose-based post-processing that corrects a known HMR2 leg-pose failure mode
 - **`eval/eval_against_gt.py`** — MPJPE / PA-MPJPE / beta-error evaluation against a dataset's ground-truth SMPL (3DPW, CloSe-Di)
@@ -90,6 +91,16 @@ Batch mode, for running a whole dataset (e.g. as input to a quantitative evaluat
 
 ```bash
 python s1_infer.py --img_folder /path/to/images --out results/s1_raw
+```
+
+Gender-aware skeleton proportions (optional, for downstream display):
+
+```bash
+pip install deepface   # or: pip install -e '.[gender]'
+# also needs SMPL_MALE.pkl / SMPL_FEMALE.pkl at ~/.cache/4DHumans/data/smpl/
+# (registration required at https://smpl.is.tue.mpg.de/, same as SMPL_NEUTRAL.pkl)
+
+python s1_infer.py --img path/to/image.jpg --out results/s1_raw --gender-aware
 ```
 
 As a library:

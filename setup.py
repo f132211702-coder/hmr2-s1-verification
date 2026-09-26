@@ -29,5 +29,10 @@ setup(
         'all': [
             'detectron2 @ git+https://github.com/facebookresearch/detectron2',
         ],
+        # s1_infer.py's optional --gender-aware flag. Not in install_requires
+        # since it pulls in TensorFlow, which nothing else here needs.
+        'gender': [
+            'deepface',
+        ],
     },
 )
