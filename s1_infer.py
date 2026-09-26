@@ -164,6 +164,15 @@ class _GenderClassifier:
 
     def __init__(self, min_confidence: float = 60.0, detector_backend: str = "retinaface"):
         self.min_confidence = min_confidence
+
+        # Keep TensorFlow off the GPU. pip's TensorFlow ships without the
+        # matching CUDA/cuDNN libraries and would also contend with PyTorch
+        # for the same card ("No DNN support for stream" on the first
+        # call). One small face crop per person is trivially fast on CPU.
+        # This only affects TensorFlow; PyTorch's GPU use is unchanged.
+        import tensorflow as tf
+        tf.config.set_visible_devices([], "GPU")
+
         # DeepFace's default "opencv" (Haar cascade) backend needs
         # cv2/data/haarcascade_frontalface_default.xml, which pip's opencv
         # build here doesn't ship -- it fails on every call. retinaface
