@@ -283,7 +283,7 @@ def load_predictions(pred_dir: Path) -> dict[str, list[PoseRecord]]:
 # GT loading
 # ---------------------------------------------------------------------------
 
-def load_3dpw_gt(seq_pkl_path: Path) -> list[PoseRecord]:
+def load_3dpw_gt(seq_pkl_path: Path, bbox_pad: float = 0.15) -> list[PoseRecord]:
     """Load one 3DPW sequence's GT
     (`sequenceFiles/{train,validation,test}/*.pkl`).
 
@@ -343,7 +343,7 @@ def load_3dpw_gt(seq_pkl_path: Path) -> list[PoseRecord]:
             # old behavior.
             gt_bbox = None
             if poses_2d is not None:
-                gt_bbox = bbox_from_keypoints_2d(poses_2d[frame_idx])
+                gt_bbox = bbox_from_keypoints_2d(poses_2d[frame_idx], pad=bbox_pad)
             records.append(PoseRecord(
                 image_id=image_id,
                 person_id=person_id,

@@ -430,15 +430,24 @@ class HMR2Estimator:
             return "neutral"
         return label
 
-    def estimate(self, img_bgr: np.ndarray, score_thresh: float = 0.5) -> list[dict]:
+    def estimate(self, img_bgr: np.ndarray, score_thresh: float = 0.5,
+                 boxes: np.ndarray | None = None) -> list[dict]:
         """Input one BGR numpy array (as returned by cv2.imread). Returns the
         SMPL parameters for every detected person (keys documented at the
-        top of this file)."""
+        top of this file).
+
+        boxes: optional (N,4) [x1,y1,x2,y2] full-image boxes. If given, the
+        person detector is skipped entirely and each result's `person_id`
+        is the index into this array -- for evaluating the regressor on
+        known crops (e.g. ground-truth boxes) separately from detection
+        quality."""
         from hmr2.datasets.vitdet_dataset import ViTDetDataset
         from hmr2.utils import recursive_to
         from hmr2.utils.renderer import cam_crop_to_full
 
-        if self.detector_backend == "transformers":
+        if boxes is not None:
+            boxes = np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
+        elif self.detector_backend == "transformers":
             boxes = self.detector(img_bgr, score_thresh=score_thresh)  # already filtered (N,4) person boxes
         else:
             det_out = self.detector(img_bgr)
