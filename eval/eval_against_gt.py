@@ -35,9 +35,22 @@ local frame, so the two sides' global orientation isn't aligned. mpjpe()
 only removes translation (recenters on the pelvis); it does nothing about
 that rotation mismatch, so the raw distance blows up. pa_mpjpe() also
 aligns rotation and scale, which corrects this, so it's the number that's
-actually comparable to what papers report for 3DPW (the official HMR2.0
-checkpoint's published PA-MPJPE is 44.4mm) — treat pa_mpjpe_mm as the
-primary metric here, and don't be alarmed by a large mpjpe_mm on its own.
+actually comparable to what papers report for 3DPW — treat pa_mpjpe_mm as
+the primary metric here, and don't be alarmed by a large mpjpe_mm on its own.
+
+Reference number (2026-09-27, corrected): the HMR2.0 paper reports TWO
+checkpoints -- 2.0a (trained on standard datasets only, 3DPW PA-MPJPE
+44.5mm) and 2.0b (also trained on AVA/AI Challenger/InstaVariety for
+better generalization to unusual poses, 3DPW PA-MPJPE 54.3mm, MPJPE
+81.3mm). Running eval/official_eval.py with this repo's DEFAULT_CHECKPOINT
+against the official preprocessed 3DPW data gave mode_re=54.33mm,
+mode_mpjpe=81.27mm -- matching 2.0b almost exactly. This repo's checkpoint
+is 2.0b; 44.4/44.5mm (2.0a) is the wrong number to compare against. A full
+run of this script after fixing load_3dpw_gt()'s GT-box matching (see
+below) gave pa_mpjpe_mm mean=58.68/median=54.48 on 24 SMPL joints -- about
+4mm above the correct 54.3mm reference, most of which eval/compare_crop_modes.py
+attributes to scoring 24 joints instead of the official 14 (~1.75mm);
+detector-vs-GT-box crop quality was not a factor (-0.36mm).
 
 Usage (skeleton self-test, no real dataset or GPU needed):
     python eval/eval_against_gt.py --self-test
