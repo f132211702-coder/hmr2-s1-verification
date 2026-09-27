@@ -26,6 +26,9 @@ def main():
     parser.add_argument('--log_freq', type=int, default=10, help='How often to log results')
     parser.add_argument('--shuffle', dest='shuffle', action='store_true', default=False, help='Shuffle the dataset during evaluation')
     parser.add_argument('--exp_name', type=str, default=None, help='Experiment name')
+    # Local addition to upstream's eval.py: point the dataset at a local image folder
+    # instead of upstream's hardcoded /shared/pavlakos/... path in datasets_eval.yaml.
+    parser.add_argument('--img_dir', type=str, default=None, help='Override the dataset IMG_DIR in datasets_eval.yaml')
 
     args = parser.parse_args()
 
@@ -42,6 +45,9 @@ def main():
     print('Evaluating on datasets: {}'.format(args.dataset), flush=True)
     for dataset in args.dataset.split(','):
         dataset_cfg = dataset_eval_config()[dataset]
+        if args.img_dir:
+            dataset_cfg.defrost()
+            dataset_cfg.IMG_DIR = args.img_dir
         args.dataset = dataset
         run_eval(model, model_cfg, dataset_cfg, device, args)
 

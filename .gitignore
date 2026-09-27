@@ -26,3 +26,4 @@ __pycache__/
 *.npy
 *.tar
 *.tar.gz
+/hmr2_evaluation_data/
