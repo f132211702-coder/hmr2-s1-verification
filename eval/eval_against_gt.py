@@ -19,9 +19,13 @@ Known issues, not yet solved:
       error. Either download the gendered models separately from
       https://smpl.is.tue.mpg.de/ and evaluate against those, or accept
       this as a known error source and note it in the finding.
-    - A 3DPW clip can have more than one person; match_prediction() only
-      does bbox-IoU matching so far and hasn't been tested on a multi-person
-      case.
+    - A 3DPW clip can have more than one person. Until 2026-09-27 the GT had
+      no box, so match_prediction() scored whichever person the detector
+      listed first against the annotated subject (a bystander in most
+      street scenes). It now builds the GT box from `poses2d` and matches by
+      IoU >= 0.3, but that `poses2d` layout is unverified against a real
+      pkl, and every 3DPW number recorded before this change (PA-MPJPE 81.67
+      mean, the per-sequence rankings) was computed the old way.
 
 Interpreting the numbers (learned from the first real 3DPW-TEST run,
 2026-09-25, 35508/35515 matched): `mpjpe_mm` can come out huge (hundreds of
@@ -213,6 +217,29 @@ def beta_error(pred_betas: np.ndarray, gt_betas: np.ndarray) -> dict:
     }
 
 
+def bbox_from_keypoints_2d(kpts: np.ndarray, pad: float = 0.15, min_points: int = 4) -> np.ndarray | None:
+    """Tight box around a person's valid 2D keypoints, padded by `pad` of
+    its width/height on each side (keypoints sit on joint centers, so a
+    tight box would cut off the body's outline). kpts is (3, K) or (K, 3)
+    with rows/cols x, y, confidence; points with confidence <= 0 are
+    ignored. Returns [x1, y1, x2, y2], or None if fewer than `min_points`
+    keypoints are valid (too little to trust)."""
+    kpts = np.asarray(kpts, dtype=np.float64)
+    if kpts.ndim != 2:
+        return None
+    if kpts.shape[0] == 3 and kpts.shape[1] != 3:
+        kpts = kpts.T
+    if kpts.shape[1] < 3:
+        return None
+    valid = kpts[kpts[:, 2] > 0]
+    if len(valid) < min_points:
+        return None
+    x1, y1 = valid[:, 0].min(), valid[:, 1].min()
+    x2, y2 = valid[:, 0].max(), valid[:, 1].max()
+    w, h = x2 - x1, y2 - y1
+    return np.array([x1 - pad * w, y1 - pad * h, x2 + pad * w, y2 + pad * h], dtype=np.float32)
+
+
 def bbox_iou(box_a: np.ndarray, box_b: np.ndarray) -> float:
     """Standard IoU, boxes as [x1,y1,x2,y2]. Used to match predicted people to GT."""
     xa1, ya1 = max(box_a[0], box_b[0]), max(box_a[1], box_b[1])
@@ -294,6 +321,7 @@ def load_3dpw_gt(seq_pkl_path: Path) -> list[PoseRecord]:
         betas = data["betas"][person_id][:10]           # (300,) -> keep first 10 to match HMR2
         joint_positions = data.get("jointPositions", [None] * num_people)[person_id]  # (num_frames, 24*3) or None
         valid = data.get("campose_valid", [None] * num_people)[person_id]
+        poses_2d = data.get("poses2d", [None] * num_people)[person_id]  # (num_frames, 3, 18) OpenPose, or None
 
         num_frames = poses.shape[0]
         for frame_idx in range(num_frames):
@@ -307,12 +335,22 @@ def load_3dpw_gt(seq_pkl_path: Path) -> list[PoseRecord]:
             joints_3d = None
             if joint_positions is not None:
                 joints_3d = joint_positions[frame_idx].reshape(24, 3)
+            # The GT box is what match_prediction() uses to pick which
+            # detected person is the annotated subject. Without it, an image
+            # with several detected people (most 3DPW street scenes) silently
+            # scored whoever the detector listed first against the subject's
+            # GT. None if poses2d is missing/unusable -> falls back to that
+            # old behavior.
+            gt_bbox = None
+            if poses_2d is not None:
+                gt_bbox = bbox_from_keypoints_2d(poses_2d[frame_idx])
             records.append(PoseRecord(
                 image_id=image_id,
                 person_id=person_id,
                 betas=betas.astype(np.float32),
                 body_pose_aa=pose_frame[1:].astype(np.float32),
                 global_orient_aa=pose_frame[0].astype(np.float32),
+                bbox=gt_bbox,
                 joints_3d=joints_3d,
             ))
     return records
@@ -345,17 +383,18 @@ def load_close_di_gt(npz_path: Path) -> PoseRecord:
 # Matching + evaluation driver
 # ---------------------------------------------------------------------------
 
-def match_prediction(preds: list[PoseRecord], gt: PoseRecord) -> PoseRecord | None:
+def match_prediction(preds: list[PoseRecord], gt: PoseRecord, min_iou: float = 0.3) -> PoseRecord | None:
     """An image's number of predictions and GT people can differ (missed or
-    extra detections); match by highest bbox IoU (must be > 0). If there's
-    only one prediction (most CloSe-Di cases), it's returned directly."""
+    extra detections). With a GT box (3DPW, from poses2d): the prediction
+    with the highest bbox IoU, and only if it reaches `min_iou` -- so a
+    frame where the detector missed the subject but found a bystander is
+    "no_prediction", not silently scored against the bystander. Without a
+    GT box (CloSe-Di, one person per file): the first prediction."""
     if not preds:
         return None
-    if len(preds) == 1:
-        return preds[0]
     if gt.bbox is None:
-        return preds[0]  # no GT bbox to compare against; fall back to the first one (TODO: not ideal)
-    best, best_iou = None, 0.0
+        return preds[0]
+    best, best_iou = None, min_iou
     for p in preds:
         if p.bbox is None:
             continue
@@ -413,7 +452,40 @@ def write_csv(rows: list[dict], out_path: Path) -> None:
 # Self-test: no real dataset needed, validates the error math itself
 # ---------------------------------------------------------------------------
 
+def matching_self_test() -> None:
+    """Pure-numpy check of the GT-box / prediction-matching logic; needs no
+    SMPL model or dataset."""
+    # OpenPose-style (3, 18) keypoints, x/y/conf; one invalid (conf 0) point
+    # far outside must be ignored.
+    kpts = np.zeros((3, 18))
+    kpts[0, :5] = [100, 200, 150, 180, 120]
+    kpts[1, :5] = [50, 300, 120, 250, 90]
+    kpts[2, :5] = [1, 1, 1, 1, 1]
+    kpts[:, 5] = [9999, 9999, 0]
+    box = bbox_from_keypoints_2d(kpts, pad=0.0)
+    assert np.allclose(box, [100, 50, 200, 300]), f"unexpected box {box}"
+    assert bbox_from_keypoints_2d(kpts.T, pad=0.0) is not None, "(K,3) layout should work too"
+    assert bbox_from_keypoints_2d(np.zeros((3, 18))) is None, "no valid keypoints -> None"
+
+    def rec(box):
+        return PoseRecord(image_id="x", person_id=0, betas=np.zeros(10),
+                          body_pose_aa=np.zeros((23, 3)), global_orient_aa=np.zeros(3),
+                          bbox=None if box is None else np.array(box, dtype=np.float32))
+
+    gt = rec([100, 100, 200, 300])
+    bystander = rec([500, 100, 600, 300])
+    subject = rec([105, 95, 205, 305])
+    assert match_prediction([bystander, subject], gt) is subject, \
+        "must pick the overlapping box, not the first one listed"
+    assert match_prediction([bystander], gt) is None, \
+        "only a non-overlapping bystander detected -> no prediction, not a wrong match"
+    assert match_prediction([bystander, subject], rec(None)) is bystander, \
+        "no GT box (CloSe-Di) keeps the first-prediction behavior"
+    print("[self-test] GT-box matching: all checks passed.")
+
+
 def self_test() -> None:
+    matching_self_test()
     rng = np.random.default_rng(42)
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     smpl_layer = build_smpl_layer(device=device, gender="neutral")

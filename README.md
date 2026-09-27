@@ -35,7 +35,7 @@ specific estimate or extending the pipeline.
 ## Features
 
 - **`s1_infer.py`** — single-image or batch-folder SMPL estimation, as a CLI or an importable `HMR2Estimator` class
-  - optional `--gender-aware`: classifies each detected person's gender (DeepFace) and renders `pred_vertices` with the matching gendered SMPL model instead of neutral, for more anatomically correct proportions in downstream display. Does **not** change the predicted `betas` values themselves, and does not fix HMR2's tendency to regress shape toward the average body — see the module docstring and the S1 evaluation report.
+  - optional `--gender {neutral,auto,male,female}`: renders `pred_vertices` with a gendered SMPL model instead of HMR2's neutral one, for more anatomically correct proportions in downstream display. `male`/`female` are set manually; `auto` classifies each person's face (DeepFace) and falls back to neutral when it can't tell. Does **not** change the predicted `betas` values themselves, and does not fix HMR2's tendency to regress shape toward the average body — see the module docstring and the S1 evaluation report.
 - **`tools/visualize.py`** — render detection boxes / mesh overlays / `.obj` exports from a saved result, without reloading the model
 - **`tools/refine_leg_pose.py`** — optional ViTPose-based post-processing that corrects a known HMR2 leg-pose failure mode
 - **`eval/eval_against_gt.py`** — MPJPE / PA-MPJPE / beta-error evaluation against a dataset's ground-truth SMPL (3DPW, CloSe-Di)
@@ -93,14 +93,15 @@ Batch mode, for running a whole dataset (e.g. as input to a quantitative evaluat
 python s1_infer.py --img_folder /path/to/images --out results/s1_raw
 ```
 
-Gender-aware skeleton proportions (optional, for downstream display):
+Gendered skeleton proportions (optional, for downstream display; `auto` needs deepface, `male`/`female` don't):
 
 ```bash
 pip install deepface tf-keras   # or: pip install -e '.[gender]'  (tf-keras is needed with TensorFlow>=2.16)
 # also needs SMPL_MALE.pkl / SMPL_FEMALE.pkl at ~/.cache/4DHumans/data/smpl/
 # (registration required at https://smpl.is.tue.mpg.de/, same as SMPL_NEUTRAL.pkl)
 
-python s1_infer.py --img path/to/image.jpg --out results/s1_raw --gender-aware
+python s1_infer.py --img path/to/image.jpg --out results/s1_raw --gender male    # manual
+python s1_infer.py --img path/to/image.jpg --out results/s1_raw --gender auto    # needs a visible face + deepface
 ```
 
 As a library:
