@@ -76,11 +76,14 @@ def summarize_per_person(eval_df: pd.DataFrame) -> pd.DataFrame:
     GT point many times."""
     df = eval_df[eval_df["status"] == "ok"].copy()
     df["sequence"] = df["image_id"].str.split("__image_").str[0]
-    return df.groupby(["sequence", "person_id"]).agg(
+    aggs = dict(
         n_frames=("beta_l2", "size"),
         beta_l2_mean=("beta_l2", "mean"),
         pa_mpjpe_mean=("pa_mpjpe_mm", "mean"),
-    ).reset_index()
+    )
+    if "pred_beta_norm" in df.columns:  # written by eval_against_gt.py since 2026-09-27
+        aggs["pred_beta_norm_mean"] = ("pred_beta_norm", "mean")
+    return df.groupby(["sequence", "person_id"]).agg(**aggs).reset_index()
 
 
 def analyze(per_person: pd.DataFrame, gt_baseline: pd.DataFrame) -> pd.DataFrame:
@@ -153,6 +156,15 @@ def main() -> None:
     print()
     print("=== correlation: beta_l2_mean vs pa_mpjpe_mean (sanity check -- should stay near 0) ===")
     print(merged[["beta_l2_mean", "pa_mpjpe_mean"]].corr())
+    if "pred_beta_norm_mean" in merged.columns:
+        pred_std, gt_std = merged["pred_beta_norm_mean"].std(), merged["gt_neutral_dist"].std()
+        print()
+        print("=== does HMR2's predicted shape track the real one? (matched subjects only) ===")
+        print(f"mean ||pred_betas||: {merged['pred_beta_norm_mean'].mean():.3f}   "
+              f"mean ||gt_betas||: {merged['gt_neutral_dist'].mean():.3f}")
+        print(f"spread across people, pred vs gt: {pred_std:.3f} vs {gt_std:.3f}  (ratio {pred_std / gt_std:.2f}; "
+              f"near 0 => predictions barely differ between people)")
+        print(f"correlation ||pred|| vs ||gt||: {merged[['pred_beta_norm_mean', 'gt_neutral_dist']].corr().iloc[0, 1]:.3f}")
     if merged["gender"].notna().any():
         print()
         print("=== beta_l2_mean / gt_neutral_dist, grouped by gender ===")

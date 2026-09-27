@@ -428,6 +428,8 @@ def evaluate(pred_by_image: dict[str, list[PoseRecord]], gt_records: list[PoseRe
             "pa_mpjpe_mm": pa_mpjpe(pred_joints, gt_joints),
             "beta_mae": err["beta_mae"],
             "beta_l2": err["beta_l2"],
+            "pred_beta_norm": float(np.linalg.norm(pred.betas)),
+            "gt_beta_norm": float(np.linalg.norm(gt.betas)),
         })
     return rows
 
