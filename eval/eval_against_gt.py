@@ -27,6 +27,19 @@ Known issues, not yet solved:
       pkl, and every 3DPW number recorded before this change (PA-MPJPE 81.67
       mean, the per-sequence rankings) was computed the old way.
 
+Status (updated 2026-10-02): added pve_mm (Per-Vertex Error, Procrustes-
+aligned, all 6890 SMPL mesh vertices) alongside beta_l2. This exists
+because comparing CameraHMR against this project's HMR2.0b numbers via
+beta_l2 (see eval_camerahmr_against_gt.py) gave a confusing result
+(beta_l2 got WORSE despite CameraHMR's paper claiming better shape
+accuracy) -- checking the paper's own Table 4 showed it supports that
+claim with PA-MPJPE/MPJPE/PVE on 3DPW, never with a raw beta-coefficient
+comparison. PVE is the metric actually comparable to the paper's claims;
+beta_l2 remains useful as this project's own earlier "does the model track
+real shape at all" probe (see verify_neutral_gender_bias.py), but isn't
+what "state-of-the-art shape accuracy" claims in this literature are
+normally measured with.
+
 Interpreting the numbers (learned from the first real 3DPW-TEST run,
 2026-09-25, 35508/35515 matched): `mpjpe_mm` can come out huge (hundreds of
 mm) on 3DPW and this is *expected*, not a bug — 3DPW's jointPositions are
@@ -153,7 +166,19 @@ def get_joints(smpl_layer, record: PoseRecord, device: "torch.device" = None) ->
     """
     if record.joints_3d is not None:
         return record.joints_3d
+    return smpl_forward(smpl_layer, record, device)[0]
 
+
+def smpl_forward(smpl_layer, record: PoseRecord,
+                  device: "torch.device" = None) -> tuple[np.ndarray, np.ndarray]:
+    """SMPL forward pass -> (24 standard joints, 6890 mesh vertices).
+
+    Unlike get_joints(), this never shortcuts via record.joints_3d, because
+    no dataset used in this project ships GT mesh vertices directly (3DPW
+    only has jointPositions) — PVE (see pve() below) needs an actual SMPL
+    forward on both the GT and the prediction side, through the SAME
+    smpl_layer, so a beta/pose difference is what the two sides' vertices
+    differ by, not a different body model."""
     from scipy.spatial.transform import Rotation
 
     body_pose_rotmat = Rotation.from_rotvec(record.body_pose_aa).as_matrix()  # (23,3,3)
@@ -165,7 +190,8 @@ def get_joints(smpl_layer, record: PoseRecord, device: "torch.device" = None) ->
 
     with torch.no_grad():
         out = smpl_layer(betas=betas_t, body_pose=body_pose_t, global_orient=global_orient_t)
-    return out.joints[0, :24].detach().cpu().numpy()
+    return (out.joints[0, :24].detach().cpu().numpy(),
+            out.vertices[0].detach().cpu().numpy())
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +243,18 @@ def pa_mpjpe(pred_joints: np.ndarray, gt_joints: np.ndarray) -> float:
     metric most commonly reported in papers."""
     aligned = compute_similarity_transform(pred_joints, gt_joints)
     return float(np.linalg.norm(aligned - gt_joints, axis=-1).mean() * 1000)
+
+
+def pve(pred_vertices: np.ndarray, gt_vertices: np.ndarray) -> float:
+    """Per-Vertex Error, in mm. Procrustes-aligned exactly like pa_mpjpe(),
+    just applied to all 6890 SMPL mesh vertices instead of the 24 body
+    joints -- this is the metric CameraHMR's own paper (Table 4) reports
+    on 3DPW/EMDB/SPEC-SYN to support its "more realistic body shape" claim,
+    unlike beta_l2 (this project's own proxy, not something the paper's
+    SOTA claims are actually based on -- see eval_camerahmr_against_gt.py's
+    docstring for why that distinction matters here)."""
+    aligned = compute_similarity_transform(pred_vertices, gt_vertices)
+    return float(np.linalg.norm(aligned - gt_vertices, axis=-1).mean() * 1000)
 
 
 def beta_error(pred_betas: np.ndarray, gt_betas: np.ndarray) -> dict:
@@ -431,7 +469,8 @@ def evaluate(pred_by_image: dict[str, list[PoseRecord]], gt_records: list[PoseRe
             continue
 
         gt_joints = get_joints(smpl_layer, gt, device)
-        pred_joints = get_joints(smpl_layer, pred, device)
+        pred_joints, pred_vertices = smpl_forward(smpl_layer, pred, device)
+        _, gt_vertices = smpl_forward(smpl_layer, gt, device)
         err = beta_error(pred.betas, gt.betas)
         rows.append({
             "image_id": gt.image_id,
@@ -439,6 +478,7 @@ def evaluate(pred_by_image: dict[str, list[PoseRecord]], gt_records: list[PoseRe
             "status": "ok",
             "mpjpe_mm": mpjpe(pred_joints, gt_joints),
             "pa_mpjpe_mm": pa_mpjpe(pred_joints, gt_joints),
+            "pve_mm": pve(pred_vertices, gt_vertices),
             "beta_mae": err["beta_mae"],
             "beta_l2": err["beta_l2"],
             "pred_beta_norm": float(np.linalg.norm(pred.betas)),
@@ -458,7 +498,7 @@ def write_csv(rows: list[dict], out_path: Path) -> None:
     ok_rows = [r for r in rows if r.get("status") == "ok"]
     print(f"{len(rows)} GT record(s) total, {len(ok_rows)} matched and scored.")
     if ok_rows:
-        for key in ("mpjpe_mm", "pa_mpjpe_mm", "beta_mae", "beta_l2"):
+        for key in ("mpjpe_mm", "pa_mpjpe_mm", "pve_mm", "beta_mae", "beta_l2"):
             values = [r[key] for r in ok_rows]
             print(f"  {key}: mean={np.mean(values):.2f}  median={np.median(values):.2f}")
 
@@ -516,26 +556,29 @@ def self_test() -> None:
     gt = random_record("dummy_0001", 0, seed_offset=0.0)
 
     # Case 1: prediction == GT, error should be 0 (sanity-checks
-    # mpjpe/pa_mpjpe's sign/units aren't wrong).
-    joints_gt = get_joints(smpl_layer, gt, device)
+    # mpjpe/pa_mpjpe/pve's sign/units aren't wrong).
+    joints_gt, vertices_gt = smpl_forward(smpl_layer, gt, device)
     err_zero_mpjpe = mpjpe(joints_gt, joints_gt)
     err_zero_pa = pa_mpjpe(joints_gt, joints_gt)
+    err_zero_pve = pve(vertices_gt, vertices_gt)
     print(f"[self-test] prediction=GT: mpjpe={err_zero_mpjpe:.6f}mm, "
-          f"pa_mpjpe={err_zero_pa:.6f}mm (both should be ~0)")
+          f"pa_mpjpe={err_zero_pa:.6f}mm, pve={err_zero_pve:.6f}mm (all should be ~0)")
     assert err_zero_mpjpe < 1e-3, "identical input should give MPJPE=0; math is wrong"
     assert err_zero_pa < 1e-3, "identical input should give PA-MPJPE=0; math is wrong"
+    assert err_zero_pve < 1e-3, "identical input should give PVE=0; math is wrong"
 
     # Case 2: prediction is GT + noise, error should be > 0, and
     # pa_mpjpe <= mpjpe (Procrustes alignment can only reduce error, by definition).
     pred_noisy = random_record("dummy_0001", 0, seed_offset=0.02)
     pred_noisy.betas = gt.betas + rng.normal(0, 0.3, 10).astype(np.float32)
-    joints_pred = get_joints(smpl_layer, pred_noisy, device)
+    joints_pred, vertices_pred = smpl_forward(smpl_layer, pred_noisy, device)
     m = mpjpe(joints_pred, joints_gt)
     pa = pa_mpjpe(joints_pred, joints_gt)
+    pve_err = pve(vertices_pred, vertices_gt)
     beta_err = beta_error(pred_noisy.betas, gt.betas)
     print(f"[self-test] prediction≈GT+noise: mpjpe={m:.2f}mm, pa_mpjpe={pa:.2f}mm, "
-          f"beta_mae={beta_err['beta_mae']:.4f}, beta_l2={beta_err['beta_l2']:.4f}")
-    assert m > 0 and pa > 0, "noisy input gave 0 error; math is wrong"
+          f"pve={pve_err:.2f}mm, beta_mae={beta_err['beta_mae']:.4f}, beta_l2={beta_err['beta_l2']:.4f}")
+    assert m > 0 and pa > 0 and pve_err > 0, "noisy input gave 0 error; math is wrong"
     assert pa <= m + 1e-4, "PA-MPJPE should never exceed MPJPE; math is wrong"
 
     # Case 3: run the full evaluate() flow (matching + CSV) too, to confirm

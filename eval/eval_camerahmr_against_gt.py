@@ -8,8 +8,23 @@ its paper targets exactly the problem found in HMR2 -- betas collapsing
 toward the average body shape regardless of the real person (see
 verify_neutral_gender_bias.py / check_beta_collapse.py / this project's
 report). This script runs the SAME 3DPW test set through CameraHMR and
-scores it with the SAME metrics (PA-MPJPE, beta_l2) so the two numbers can
-be compared head-to-head, not eyeballed from demo images.
+scores it with metrics comparable to HMR2.0b's numbers, not eyeballed
+from demo images.
+
+Status (updated 2026-10-02): a first real run (stride=20, 1787 samples)
+gave pa_mpjpe_mm mean 45.67/median 40.72 (clear improvement over HMR2.0b's
+58.68/54.48 -- and consistent in direction/magnitude with the CameraHMR
+paper's own Table 4 "4DH"-trained-data row: 54.3->38.7mm on 3DPW), but
+beta_l2 mean 3.39 (WORSE than HMR2.0b's 2.76). Checking the paper (Table
+4 + Sec 5.1) found it never reports a raw beta-coefficient comparison on
+3DPW at all -- its "more realistic body shape" claim is evaluated on the
+SSP-3D dataset (a different benchmark, results only in Sup. Mat.) and its
+3DPW numbers use PA-MPJPE/MPJPE/PVE. So beta_l2 getting worse doesn't
+actually contradict the paper; it's evidence from a metric the paper's
+claim was never based on. Added pve_mm (Per-Vertex Error, Procrustes-
+aligned, all 6890 mesh vertices) as the metric that IS comparable to
+Table 4, computed via the SAME neutral SMPL body model on both the GT and
+predicted side (est.body_model) -- not yet run with this addition.
 
 Design choices, and why:
   - Feeds CameraHMR the GT box directly (from 3DPW poses2d, same
@@ -91,9 +106,14 @@ def summarize(rows: list[dict]) -> None:
           f"({len(rows) - len(ok_rows)} skipped -- see 'status' column)")
     if not ok_rows:
         return
-    print("\n=== CameraHMR on 3DPW-TEST (GT box), vs HMR2.0b reference "
-          "(eval_3dpw_fixed.csv: pa_mpjpe 58.68/54.48mm, beta_l2 2.76) ===")
-    for key in ("pa_mpjpe_mm", "beta_l2", "pred_beta_norm", "gt_beta_norm"):
+    print("\n=== CameraHMR on 3DPW-TEST (GT box) ===")
+    print("Compare pa_mpjpe_mm/pve_mm against a FRESH run of eval_against_gt.py "
+          "with --smpl-gender neutral (its default) on the same 3DPW-TEST split -- "
+          "both sides' GT vertices must come from the same (neutral) body model for "
+          "pve_mm to be a fair comparison; see this module's and pve()'s docstrings. "
+          "beta_l2 is this project's own shape-collapse probe, not the metric "
+          "CameraHMR's paper bases its shape-accuracy claim on (see module docstring).")
+    for key in ("pa_mpjpe_mm", "pve_mm", "beta_l2", "pred_beta_norm", "gt_beta_norm"):
         values = np.array([r[key] for r in ok_rows])
         print(f"  {key}: mean={values.mean():.2f}  median={np.median(values):.2f}")
 
@@ -127,8 +147,31 @@ def main() -> None:
     import cv2
     import torch
 
-    from eval_against_gt import beta_error, load_3dpw_gt, pa_mpjpe  # noqa: E402
+    from eval_against_gt import beta_error, load_3dpw_gt, pa_mpjpe, pve  # noqa: E402
     from mesh_estimator import HumanMeshEstimator  # noqa: E402
+
+    def gt_vertices_neutral(est, rec) -> np.ndarray:
+        """GT mesh vertices via the SAME neutral SMPL body model CameraHMR's
+        predictions use (est.body_model). 3DPW doesn't ship GT vertices
+        directly (only jointPositions), so this always needs an SMPL forward
+        pass. Using the identical (neutral) body model on both sides keeps
+        PVE self-consistent -- a difference then reflects a difference in
+        the beta/pose VALUES, not in which body model generated the mesh.
+        Known tradeoff: 3DPW's betas were actually fit with a GENDERED
+        model, so this isn't the literal mesh used to build the dataset --
+        same caveat eval_against_gt.py's docstring already flags for
+        beta_l2/joint comparisons applies here too."""
+        from scipy.spatial.transform import Rotation
+        body_pose_rotmat = Rotation.from_rotvec(rec.body_pose_aa).as_matrix()
+        global_orient_rotmat = Rotation.from_rotvec(rec.global_orient_aa[None]).as_matrix()
+        betas_t = torch.tensor(rec.betas, dtype=torch.float32, device=est.device)[None]
+        body_pose_t = torch.tensor(body_pose_rotmat, dtype=torch.float32, device=est.device)[None]
+        global_orient_t = torch.tensor(global_orient_rotmat, dtype=torch.float32,
+                                        device=est.device)[None]
+        with torch.no_grad():
+            out = est.body_model(betas=betas_t, body_pose=body_pose_t,
+                                  global_orient=global_orient_t)
+        return out.vertices[0].detach().cpu().numpy()
 
     class GTBoxEstimator(HumanMeshEstimator):
         """Identical to HumanMeshEstimator, except it never loads the
@@ -173,11 +216,13 @@ def main() -> None:
 
             pred_betas = out_smpl_params["betas"][0].detach().cpu().numpy()
             pred_joints_24 = pred_joints[0, :24].detach().cpu().numpy()
+            pred_vertices_np = pred_vertices[0].detach().cpu().numpy()
 
             err = beta_error(pred_betas, rec.betas)
             rows.append({
                 "image_id": rec.image_id, "person_id": rec.person_id, "status": "ok",
                 "pa_mpjpe_mm": pa_mpjpe(pred_joints_24, rec.joints_3d),
+                "pve_mm": pve(pred_vertices_np, gt_vertices_neutral(est, rec)),
                 "beta_mae": err["beta_mae"], "beta_l2": err["beta_l2"],
                 "pred_beta_norm": float(np.linalg.norm(pred_betas)),
                 "gt_beta_norm": float(np.linalg.norm(rec.betas)),
@@ -196,9 +241,9 @@ def self_test() -> None:
     assert np.allclose(scale, [1.0, 2.0]), f"unexpected scale {scale}"
 
     rows = [
-        {"image_id": "a", "person_id": 0, "status": "ok", "pa_mpjpe_mm": 50.0,
+        {"image_id": "a", "person_id": 0, "status": "ok", "pa_mpjpe_mm": 50.0, "pve_mm": 70.0,
          "beta_mae": 0.1, "beta_l2": 2.0, "pred_beta_norm": 0.5, "gt_beta_norm": 2.5},
-        {"image_id": "b", "person_id": 0, "status": "ok", "pa_mpjpe_mm": 60.0,
+        {"image_id": "b", "person_id": 0, "status": "ok", "pa_mpjpe_mm": 60.0, "pve_mm": 85.0,
          "beta_mae": 0.2, "beta_l2": 3.0, "pred_beta_norm": 0.4, "gt_beta_norm": 3.1},
         {"image_id": "c", "person_id": 0, "status": "no_image"},
     ]
