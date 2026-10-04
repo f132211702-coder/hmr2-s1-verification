@@ -32,8 +32,17 @@ code does `import lib...` expecting that directory on sys.path (see
 tokenhmr/demo.py, which is run as `python tokenhmr/demo.py` from the repo
 root for the same reason).
 
-Status: --self-test validates the CSV-writing/summary bookkeeping against
-synthetic data. Not yet run against the real model/3DPW data.
+Status (updated 2026-10-04): a first real run (stride=20, 1787 samples)
+gave pve_mm mean 58.71 (reasonable, in line with HMR2.0b's 64.32 and
+CameraHMR's 51.91) but pa_mpjpe_mm mean 433.75 -- wildly inconsistent with
+a pve_mm that low on the same predictions. Root cause: model.smpl is
+lib.models.smpl_wrapper.SMPL, a smplx.SMPLLayer subclass whose forward()
+overwrites .joints with an OpenPose-25 remap before returning (see
+lib/models/smpl_wrapper.py), so out['pred_keypoints_3d'] was never in the
+standard SMPL 24-joint order 3DPW's jointPositions uses. Fixed by
+raw_smpl_joints_24(), which calls smplx.SMPLLayer.forward() directly
+(bypassing the subclass override) on model.smpl's own predicted
+betas/pose. Not yet re-run with this fix.
 
 Usage (self-test, no GPU/model/data needed):
     python eval/eval_tokenhmr_against_gt.py --self-test
@@ -118,12 +127,33 @@ def main() -> None:
     from lib.models import load_tokenhmr  # noqa: E402
     from lib.datasets.vitdet_dataset import ViTDetDataset  # noqa: E402
     from lib.utils import recursive_to  # noqa: E402
+    import smplx  # noqa: E402
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     model, model_cfg = load_tokenhmr(checkpoint_path=args.checkpoint,
                                       model_cfg=args.model_config,
                                       is_train_state=False, is_demo=True)
     model = model.to(device).eval()
+
+    def raw_smpl_joints_24(pred_smpl_params: dict) -> np.ndarray:
+        """model.smpl is lib.models.smpl_wrapper.SMPL, a smplx.SMPLLayer
+        SUBCLASS whose forward() overwrites .joints with an OpenPose-25
+        remap (joints = smpl_output.joints[:, self.joint_map, :], see
+        lib/models/smpl_wrapper.py) before returning -- so out['pred_keypoints_3d']
+        is in OpenPose order, NOT the standard SMPL 24-joint order 3DPW's
+        jointPositions uses (this was confirmed the hard way: scoring
+        against it gave pa_mpjpe_mm ~434mm, wildly inconsistent with a
+        pve_mm of ~59mm on the same predictions). Calling the PARENT
+        class's forward directly bypasses that override while still using
+        model.smpl's own loaded weights/template -- no separate SMPL file
+        or config key to track down."""
+        b = pred_smpl_params["betas"].reshape(1, -1)
+        bp = pred_smpl_params["body_pose"].reshape(1, -1, 3, 3)
+        go = pred_smpl_params["global_orient"].reshape(1, -1, 3, 3)
+        with torch.no_grad():
+            raw_out = smplx.SMPLLayer.forward(model.smpl, betas=b, body_pose=bp,
+                                              global_orient=go, pose2rot=False)
+        return raw_out.joints[0, :24].detach().cpu().numpy()
 
     def gt_vertices_neutral(rec) -> np.ndarray:
         """GT mesh vertices via TokenHMR's OWN (neutral) SMPL instance,
@@ -165,8 +195,8 @@ def main() -> None:
             with torch.no_grad():
                 out = model(batch)
 
-            pred_betas = out["pred_smpl_params"]["betas"][0].detach().cpu().numpy()
-            pred_joints_24 = out["pred_keypoints_3d"][0, :24].detach().cpu().numpy()
+            pred_betas = out["pred_smpl_params"]["betas"].reshape(-1).detach().cpu().numpy()
+            pred_joints_24 = raw_smpl_joints_24(out["pred_smpl_params"])
             pred_vertices = out["pred_vertices"][0].detach().cpu().numpy()
 
             err = beta_error(pred_betas, rec.betas)
