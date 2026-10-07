@@ -123,7 +123,7 @@ def main() -> None:
     import cv2
     import torch
 
-    from eval_against_gt import beta_error, load_3dpw_gt, pa_mpjpe, pve  # noqa: E402
+    from eval_against_gt import beta_columns, beta_error, load_3dpw_gt, pa_mpjpe, pve  # noqa: E402
     from lib.models import load_tokenhmr  # noqa: E402
     from lib.datasets.vitdet_dataset import ViTDetDataset  # noqa: E402
     from lib.utils import recursive_to  # noqa: E402
@@ -207,6 +207,8 @@ def main() -> None:
                 "beta_mae": err["beta_mae"], "beta_l2": err["beta_l2"],
                 "pred_beta_norm": float(np.linalg.norm(pred_betas)),
                 "gt_beta_norm": float(np.linalg.norm(rec.betas)),
+                **beta_columns("pred_beta", pred_betas),
+                **beta_columns("gt_beta", rec.betas),
             })
         print(f"{seq}: {len(rows) - n_before} frame(s) added, {len(rows)} total", flush=True)
 

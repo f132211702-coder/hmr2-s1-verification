@@ -268,6 +268,13 @@ def beta_error(pred_betas: np.ndarray, gt_betas: np.ndarray) -> dict:
     }
 
 
+def beta_columns(prefix: str, betas: np.ndarray) -> dict:
+    """{prefix}_0 .. {prefix}_{K-1} columns for a betas vector, so the eval
+    CSVs keep the full shape vector (not just its norm) -- eval/measure_body_error.py
+    needs the actual coefficients to turn them into body measurements."""
+    return {f"{prefix}_{i}": float(b) for i, b in enumerate(np.asarray(betas).reshape(-1))}
+
+
 def bbox_from_keypoints_2d(kpts: np.ndarray, pad: float = 0.15, min_points: int = 4) -> np.ndarray | None:
     """Tight box around a person's valid 2D keypoints, padded by `pad` of
     its width/height on each side (keypoints sit on joint centers, so a
@@ -306,9 +313,17 @@ def bbox_iou(box_a: np.ndarray, box_b: np.ndarray) -> float:
 # Prediction loading (reads s1_infer.py's npz output; format is ours, not a TODO)
 # ---------------------------------------------------------------------------
 
-def load_predictions(pred_dir: Path) -> dict[str, list[PoseRecord]]:
+def frame_of(image_id: str) -> int:
+    """Frame number from a 3DPW image_id like '<seq>__image_00020'."""
+    return int(image_id.rsplit("_", 1)[1])
+
+
+def load_predictions(pred_dir: Path, stride: int = 1) -> dict[str, list[PoseRecord]]:
     """Scan `<image_id>_<person_id>_smpl_params.npz` files produced by
-    s1_infer.py, grouped by image_id."""
+    s1_infer.py, grouped by image_id. stride > 1 keeps only frames with
+    frame % stride == 0 (3DPW image_ids only), skipping the other files
+    before they're even opened -- reading all ~35k npz files is the slow
+    part of a full run."""
     by_image: dict[str, list[PoseRecord]] = {}
     for npz_path in sorted(pred_dir.glob("*_smpl_params.npz")):
         stem = npz_path.stem  # "<image_id>_<person_id>_smpl_params"
@@ -317,6 +332,8 @@ def load_predictions(pred_dir: Path) -> dict[str, list[PoseRecord]]:
         # — splitting off only 2 cuts between "smpl" and "params" instead
         # and misreads "smpl" as the person_id.
         image_id, person_id = stem.rsplit("_", 3)[0], stem.rsplit("_", 3)[1]
+        if stride > 1 and frame_of(image_id) % stride != 0:
+            continue
         data = np.load(npz_path)
         record = PoseRecord(
             image_id=image_id,
@@ -483,6 +500,8 @@ def evaluate(pred_by_image: dict[str, list[PoseRecord]], gt_records: list[PoseRe
             "beta_l2": err["beta_l2"],
             "pred_beta_norm": float(np.linalg.norm(pred.betas)),
             "gt_beta_norm": float(np.linalg.norm(gt.betas)),
+            **beta_columns("pred_beta", pred.betas),
+            **beta_columns("gt_beta", gt.betas),
         })
     return rows
 
@@ -599,6 +618,10 @@ def main() -> None:
     ap.add_argument("--gt_dir", type=str, help="3DPW's sequenceFiles/test, or a CloSe-Di folder")
     ap.add_argument("--out", type=str, default="results/eval.csv")
     ap.add_argument("--device", type=str, default=None)
+    ap.add_argument("--stride", type=int, default=1,
+                     help="3DPW only: evaluate every Nth frame (frame %% stride == 0), to line "
+                          "up with eval_camerahmr_against_gt.py / eval_tokenhmr_against_gt.py's "
+                          "--stride 20 runs. Default 1 = every frame (unchanged behavior).")
     ap.add_argument("--smpl-gender", type=str, default="neutral",
                      choices=["neutral", "male", "female"],
                      help="which SMPL model to turn PREDICTED betas+pose into joints with. "
@@ -621,13 +644,15 @@ def main() -> None:
         torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     )
     smpl_layer = build_smpl_layer(device=device, gender=args.smpl_gender)
-    pred_by_image = load_predictions(Path(args.pred_dir))
+    pred_by_image = load_predictions(Path(args.pred_dir), stride=args.stride)
 
     gt_dir = Path(args.gt_dir)
     if args.dataset == "3dpw":
         gt_records = []
         for pkl_path in sorted(gt_dir.glob("*.pkl")):
             gt_records.extend(load_3dpw_gt(pkl_path))
+        if args.stride > 1:
+            gt_records = [r for r in gt_records if frame_of(r.image_id) % args.stride == 0]
     else:
         gt_records = [load_close_di_gt(p) for p in sorted(gt_dir.glob("*.npz"))]
 
