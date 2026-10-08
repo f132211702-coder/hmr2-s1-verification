@@ -106,6 +106,24 @@ def analyse(header: list[str], rows: list[dict]) -> list[str]:
     return lines
 
 
+def merge_split(split_dir: Path) -> tuple[list[str], list[dict], str] | None:
+    """BodyM keeps height/weight/gender (hwg_metadata.csv) and the 14 measurements
+    (measurements.csv) in separate tables per split; join them on the column they share
+    (preferring one whose name contains 'subject'). Returns (header, rows, join column)."""
+    meas, hwg = split_dir / "measurements.csv", split_dir / "hwg_metadata.csv"
+    if not (meas.exists() and hwg.exists()):
+        return None
+    h_m, r_m = read_csv(meas)
+    h_h, r_h = read_csv(hwg)
+    common = [c for c in h_m if c in h_h]
+    if not common:
+        return None
+    key = next((c for c in common if "subject" in c.lower()), common[0])
+    by_key = {r[key]: r for r in r_h}
+    rows = [{**r, **by_key[r[key]]} for r in r_m if r[key] in by_key]
+    return list(dict.fromkeys(h_m + h_h)), rows, key
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", required=True)
@@ -116,9 +134,23 @@ def main() -> None:
         raise SystemExit(f"no csv/tsv under {root} -- run fetch_bodym.py --download first")
     for p in tables:
         print("\n".join(describe_table(p)))
-        header, rows = read_csv(p)
+        print()
+    pooled_header, pooled_rows = [], []
+    for split in sorted({p.parent for p in tables}):
+        merged = merge_split(split)
+        if merged is None:
+            continue
+        header, rows, key = merged
+        print(f"=== {split.name}: measurements.csv joined with hwg_metadata.csv on '{key}' "
+              f"-> {len(rows)} subjects ===")
         print("\n".join(analyse(header, rows)))
         print()
+        pooled_header = list(dict.fromkeys(pooled_header + header))
+        pooled_rows += rows
+    if pooled_rows:
+        print(f"=== all splits pooled ({len(pooled_rows)} subjects; if the splits share subjects "
+              f"they are counted twice) ===")
+        print("\n".join(analyse(pooled_header, pooled_rows)))
 
 
 def self_test() -> None:
@@ -149,6 +181,23 @@ def self_test() -> None:
         r2_h = float(line.split("height alone R^2")[1].split()[0])
         r2_hw = float(line.split("height+weight R^2")[1].split()[0])
         assert r2_hw > r2_h + 0.3 and r2_hw > 0.8, line
+        # split join: measurements and hwg_metadata in separate tables, shared 'subject_id'
+        sp = Path(d) / "train"
+        sp.mkdir()
+        with open(sp / "measurements.csv", "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["subject_id", "chest_girth", "waist_girth", "hip_girth"])
+            for i in range(n):
+                w.writerow([f"s{i}", 60 + 0.6 * weight[i], waist[i], 50 + 0.7 * weight[i]])
+        with open(sp / "hwg_metadata.csv", "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["subject_id", "height_cm", "weight_kg", "gender"])
+            for i in reversed(range(n - 5)):   # different order, 5 subjects missing
+                w.writerow([f"s{i}", height[i], weight[i], "male" if i % 2 else "female"])
+        header, rows, key = merge_split(sp)
+        assert key == "subject_id" and len(rows) == n - 5, (key, len(rows))
+        assert "usable rows (all five values present): 195 of 195" in "\n".join(analyse(header, rows))
+        assert merge_split(Path(d)) is None
         (Path(d) / "other.csv").write_text("a,b\n1,2\n")
         h2, r2 = read_csv(Path(d) / "other.csv")
         assert "no column matched" in "\n".join(analyse(h2, r2))
