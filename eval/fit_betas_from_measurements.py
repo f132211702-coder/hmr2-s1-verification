@@ -148,11 +148,22 @@ def macro_average(rows: list[dict], metric_keys: list[str]) -> dict:
                               for s in subjects])) for k in metric_keys}
 
 
-def score_body(measure, vertices, betas, gender, gt_m, gt_v, names=ALL_NAMES) -> dict:
-    """Errors of one candidate body against one ground-truth body."""
+def score_body(measure, vertices, betas, gender, gt_m, gt_v, names=ALL_NAMES,
+               calibrate: bool = False) -> dict:
+    """Errors of one candidate body against one ground-truth body.
+    calibrate=True simulates 'the user told us their real height': the candidate
+    body is uniformly scaled (about its centroid) so its height equals the real
+    one, and all its measurements scale with it. Height error is then 0 by
+    construction."""
     m = measure(betas, gender)
+    v = vertices(betas, gender)
+    if calibrate:
+        s = gt_m["height"] / m["height"]
+        m = {n: x * s for n, x in m.items()}
+        c = v.mean(axis=0)
+        v = (v - c) * s + c
     out = {f"err {n}": abs(m[n] - gt_m[n]) for n in names}
-    out["tpose_pve_mm"] = tpose_pve_mm(vertices(betas, gender), gt_v)
+    out["tpose_pve_mm"] = tpose_pve_mm(v, gt_v)
     return out
 
 
@@ -169,6 +180,10 @@ def main() -> None:
     ap.add_argument("--noise-cm", type=float, default=1.5, help="std of simulated tape-measure error")
     ap.add_argument("--noise-draws", type=int, default=20)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--photo-height-only", action="store_true",
+                    help="only the 'one photo + the user's height' comparison: the image-model rows "
+                         "(raw and rescaled to the real height) next to the height-only regression "
+                         "(NEUTRAL). Skips the tape-measure input sets and the MALE fit (much faster).")
     ap.add_argument("--out", default="results/betas_from_measurements.csv")
     args = ap.parse_args()
 
@@ -208,22 +223,28 @@ def main() -> None:
 
     # ---- image-based rows -------------------------------------------------
     def image_rows(label, betas_of_key):
-        rows = []
-        for k in keys:
-            sk = subject_key(gt_betas[k])
-            gt_m, gt_v = gt_body[sk]
-            r = score_body(measure, vertices, betas_of_key(k), "NEUTRAL", gt_m, gt_v)
-            r["subject"] = sk
-            rows.append(r)
-        results[label] = macro_average(rows, metric_keys)
-        print(f"  scored {label}", flush=True)
+        # Each image-based body is scored twice: as predicted, and "+ height" (rescaled to
+        # the real height -- the 'one photo plus the user's height' setting).
+        for calibrate, suffix in ((False, ""), (True, " + height")):
+            rows = []
+            for k in keys:
+                sk = subject_key(gt_betas[k])
+                gt_m, gt_v = gt_body[sk]
+                r = score_body(measure, vertices, betas_of_key(k), "NEUTRAL", gt_m, gt_v,
+                               calibrate=calibrate)
+                r["subject"] = sk
+                rows.append(r)
+            results[label + suffix] = macro_average(rows, metric_keys)
+            print(f"  scored {label + suffix}", flush=True)
 
     image_rows(BASELINE, lambda k: np.zeros(N_BETAS))
     for name, by_key in pred_betas.items():
         image_rows(name, lambda k, by_key=by_key: by_key[k])
 
     # ---- measurement-based rows -------------------------------------------
-    for gender in ("NEUTRAL", "MALE"):
+    genders = ("NEUTRAL",) if args.photo_height_only else ("NEUTRAL", "MALE")
+    input_sets = {"height": INPUT_SETS["height"]} if args.photo_height_only else INPUT_SETS
+    for gender in genders:
         print(f"fitting on {args.n_samples} random {gender} bodies ...", flush=True)
         B = sample_betas(args.n_samples + args.n_val, rng)
         meas = []
@@ -232,7 +253,7 @@ def main() -> None:
             if (i + 1) % 500 == 0:
                 print(f"  measured {i + 1}/{len(B)}", flush=True)
         n_fit = args.n_samples
-        for set_name, names in INPUT_SETS.items():
+        for set_name, names in input_sets.items():
             X = matrix(meas, names)
             best = None
             for degree in (1, 2):
@@ -325,6 +346,18 @@ def self_test() -> None:
     assert max(r_good.values()) < 1e-9
     rows = [dict(subject="a", e=1.0)] * 9 + [dict(subject="b", e=3.0)]
     assert macro_average(rows, ["e"])["e"] == 2.0
+
+    # calibrate (known real height): candidate 20% too small -> height error becomes 0, other
+    # measurements scale up by the same factor, vertices scale about their centroid.
+    def small_measure(b, g):
+        return {n: 0.8 * x for n, x in toy_measure(gt_b, g).items()}
+    def small_vertices(b, g):
+        return 0.8 * toy_vertices(gt_b, g)
+    raw = score_body(small_measure, small_vertices, gt_b, "X", gt_m, gt_v)
+    cal = score_body(small_measure, small_vertices, gt_b, "X", gt_m, gt_v, calibrate=True)
+    assert raw["err height"] > 10 and cal["err height"] < 1e-9
+    assert max(cal.values()) < 1e-9, "a purely too-small body is exactly fixed by height calibration"
+    assert raw["tpose_pve_mm"] > cal["tpose_pve_mm"]
 
     print("[self-test] all checks passed.")
 
