@@ -209,9 +209,10 @@ def summarize(rows: list[dict], names: list[str], failures: list) -> None:
 
 def build_measurer(anthro_root: Path, names: list[str]):
     """Set up SMPL-Anthropometry (chdir into it: its model path is relative and it
-    must be importable) and return (measure, vertices):
+    must be importable) and return (measure, vertices, faces):
         measure(betas, gender)  -> {measurement name: cm}  (neutral T-pose, betas only)
         vertices(betas, gender) -> (6890, 3) T-pose mesh in meters
+        faces                   -> (13776, 3) triangle indices of that mesh
     One smplx model per gender is created once and reused -- from_body_model()
     would re-read the .pkl for every call. Call this AFTER resolving any
     user-given relative paths: it changes the working directory."""
@@ -244,7 +245,7 @@ def build_measurer(anthro_root: Path, names: list[str]):
         shape(betas, gender)
         return measurer.verts.copy()
 
-    return measure, vertices
+    return measure, vertices, measurer.faces
 
 
 def write_rows(rows: list[dict], out_path: Path) -> None:
@@ -293,7 +294,7 @@ def main() -> None:
         print(f"subsampled to {len(keys)} record(s)")
 
     names = list(dict.fromkeys(["height"] + list(args.measurements)))  # height needed for calibration
-    measure, _ = build_measurer(anthro_root, names)
+    measure, _, _ = build_measurer(anthro_root, names)
 
     rows, failures = compute_rows(keys, gt_betas, pred_betas,
                                   measure_gt=lambda b: measure(b, args.gt_gender),
