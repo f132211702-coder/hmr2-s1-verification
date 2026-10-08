@@ -180,20 +180,31 @@ def summarize(rows: list[dict], names: list[str], failures: list) -> None:
 
     def stats(model, name, col):
         sel = [r for r in rows if r["model"] == model and r["measurement"] == name]
-        err = np.array([r[col] - r["gt_cm"] for r in sel])
-        return np.abs(err).mean(), np.median(np.abs(err)), err.mean()
+        pred = np.array([r[col] for r in sel])
+        gt = np.array([r["gt_cm"] for r in sel])
+        err = pred - gt
+        corr = (float(np.corrcoef(pred, gt)[0, 1])
+                if len(sel) > 2 and pred.std() > 0 and gt.std() > 0 else float("nan"))
+        return np.abs(err).mean(), np.median(np.abs(err)), err.mean(), err.std(), corr
 
     for name in names:
         print(f"\n=== {name} (cm) ===")
-        print(f"{'model':24s}{'MAE':>8s}{'median':>9s}{'bias':>8s}"
+        print(f"{'model':24s}{'MAE':>8s}{'median':>9s}{'bias':>8s}{'err std':>9s}{'corr':>7s}"
               f"{'| MAE, height-calibrated':>26s}")
         for m in models:
-            mae, med, bias = stats(m, name, "pred_cm")
+            mae, med, bias, std, corr = stats(m, name, "pred_cm")
+            corr_s = "n/a" if np.isnan(corr) else f"{corr:+.2f}"
             cal = "n/a (height)" if name == "height" else f"{stats(m, name, 'pred_cm_calibrated')[0]:.2f}"
-            print(f"{m:24s}{mae:8.2f}{med:9.2f}{bias:+8.2f}{cal:>26s}")
+            print(f"{m:24s}{mae:8.2f}{med:9.2f}{bias:+8.2f}{std:9.2f}{corr_s:>7s}{cal:>26s}")
+        gt_std = np.std(gt_by_name[name])
+        print(f"  (spread of the real measurement across these records: std {gt_std:.2f} cm -- "
+              f"a model that tracks people should show 'err std' below this, and a clearly "
+              f"positive 'corr')")
     print("\nbias = mean(pred - gt): negative = the model's body is smaller than the real one. "
-          "A model only shows real per-person shape information where its MAE is clearly "
-          f"below '{BASELINE}'.")
+          "err std = spread of the error with the bias removed. corr = correlation of predicted "
+          "vs real values across records (n/a for the constant mean-shape baseline). MAE alone is "
+          "dominated by bias; per-person shape information shows up as err std < real spread "
+          f"and positive corr, and MAE below '{BASELINE}'.")
 
 
 def write_rows(rows: list[dict], out_path: Path) -> None:
