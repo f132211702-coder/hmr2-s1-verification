@@ -161,10 +161,11 @@ def parse_models(specs):
 
 def setup_tool(args):
     from eval_ssp3d_shape import candidate_scores  # noqa: E402
-    from fit_betas_from_measurements import with_weight  # noqa: E402
+    from fit_betas_from_measurements import TOOL_NAMES, with_weight  # noqa: E402
     from measure_body_error import build_measurer  # noqa: E402
     anthro = Path(args.anthro_root).expanduser().resolve()
-    measure_tool, vertices, faces = build_measurer(anthro, ["height", "waist circumference", "chest circumference"])
+    # candidate_scores scores every measurement in ALL_NAMES, so measure all of the tool's names
+    measure_tool, vertices, faces = build_measurer(anthro, TOOL_NAMES)
     return with_weight(measure_tool, vertices, faces), vertices, faces, candidate_scores
 
 
