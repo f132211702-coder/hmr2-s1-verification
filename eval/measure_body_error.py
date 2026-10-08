@@ -207,6 +207,46 @@ def summarize(rows: list[dict], names: list[str], failures: list) -> None:
           f"and positive corr, and MAE below '{BASELINE}'.")
 
 
+def build_measurer(anthro_root: Path, names: list[str]):
+    """Set up SMPL-Anthropometry (chdir into it: its model path is relative and it
+    must be importable) and return (measure, vertices):
+        measure(betas, gender)  -> {measurement name: cm}  (neutral T-pose, betas only)
+        vertices(betas, gender) -> (6890, 3) T-pose mesh in meters
+    One smplx model per gender is created once and reused -- from_body_model()
+    would re-read the .pkl for every call. Call this AFTER resolving any
+    user-given relative paths: it changes the working directory."""
+    sys.path.insert(0, str(anthro_root))
+    os.chdir(anthro_root)
+    import torch
+    from measure import MeasureBody, create_model, set_shape  # noqa: E402
+
+    measurer = MeasureBody("smpl")
+    models: dict = {}
+
+    def shape(betas: np.ndarray, gender: str) -> None:
+        # Same steps as MeasureSMPL.from_body_model.
+        if gender not in models:
+            models[gender] = create_model(model_type="smpl", model_root="data", gender=gender,
+                                          num_betas=N_BETAS, num_thetas=measurer.num_joints)
+        with torch.no_grad():
+            out = set_shape(models[gender], torch.tensor(betas, dtype=torch.float32)[None])
+        measurer.verts = out.vertices.detach().cpu().numpy().squeeze()
+        measurer.joints = out.joints.squeeze().detach().cpu().numpy()
+        measurer.gender = gender
+
+    def measure(betas: np.ndarray, gender: str) -> dict:
+        shape(betas, gender)
+        measurer.measurements = {}
+        measurer.measure(names)
+        return dict(measurer.measurements)
+
+    def vertices(betas: np.ndarray, gender: str) -> np.ndarray:
+        shape(betas, gender)
+        return measurer.verts.copy()
+
+    return measure, vertices
+
+
 def write_rows(rows: list[dict], out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", newline="") as f:
@@ -252,29 +292,8 @@ def main() -> None:
         keys = [keys[i] for i in np.linspace(0, len(keys) - 1, args.limit).astype(int)]
         print(f"subsampled to {len(keys)} record(s)")
 
-    sys.path.insert(0, str(anthro_root))
-    os.chdir(anthro_root)
-    import torch
-    from measure import MeasureBody, create_model, set_shape  # noqa: E402
-
     names = list(dict.fromkeys(["height"] + list(args.measurements)))  # height needed for calibration
-    measurer = MeasureBody("smpl")
-    models: dict = {}
-
-    def measure(betas: np.ndarray, gender: str) -> dict:
-        # Same steps as MeasureSMPL.from_body_model, but reusing one smplx model per gender
-        # instead of re-reading the .pkl for every record.
-        if gender not in models:
-            models[gender] = create_model(model_type="smpl", model_root="data", gender=gender,
-                                          num_betas=N_BETAS, num_thetas=measurer.num_joints)
-        with torch.no_grad():
-            out = set_shape(models[gender], torch.tensor(betas, dtype=torch.float32)[None])
-        measurer.verts = out.vertices.detach().cpu().numpy().squeeze()
-        measurer.joints = out.joints.squeeze().detach().cpu().numpy()
-        measurer.gender = gender
-        measurer.measurements = {}
-        measurer.measure(names)
-        return dict(measurer.measurements)
+    measure, _ = build_measurer(anthro_root, names)
 
     rows, failures = compute_rows(keys, gt_betas, pred_betas,
                                   measure_gt=lambda b: measure(b, args.gt_gender),
