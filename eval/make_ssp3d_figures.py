@@ -71,7 +71,7 @@ def choose_cases(entries: list[dict]) -> list[dict]:
 FRONT_H = 300        # height of the front-view part of the shape panel (px); the rest is the waist slice
 ARM_CUT_M = 0.30     # T-pose triangles farther than this from the body axis (the arms) are not drawn
 WAIST_FRAC = 0.60    # waist-slice height as a fraction of body height (about the navel)
-SLICE_PX_PER_M = 280.0
+SLICE_PX_PER_M = 235.0
 
 
 def scaled_to_gt(v: np.ndarray, gt_height: float) -> np.ndarray:
