@@ -47,7 +47,7 @@ IMG_EXT = {".png", ".jpg", ".jpeg"}
 COLORS = {"CameraHMR": (220, 90, 20), "HMR2.0b": (60, 170, 60), "mean body": (0, 140, 255)}  # BGR
 LABELS = ["best", "median", "worst"]
 CELL = 420
-PANEL_W = 260   # width of the shape panel (its height is CELL)
+PANEL_W = 340   # width of the shape panel (its height is CELL)
 
 
 # ---------------------------------------------------------------- selection
@@ -68,23 +68,35 @@ def choose_cases(entries: list[dict]) -> list[dict]:
 
 
 # ---------------------------------------------------------------- silhouettes
+FRONT_H = 300        # height of the front-view part of the shape panel (px); the rest is the waist slice
+ARM_CUT_M = 0.30     # T-pose triangles farther than this from the body axis (the arms) are not drawn
+WAIST_FRAC = 0.60    # waist-slice height as a fraction of body height (about the navel)
+SLICE_PX_PER_M = 280.0
+
+
+def scaled_to_gt(v: np.ndarray, gt_height: float) -> np.ndarray:
+    """Mesh uniformly scaled to the GT height, feet at y=0, body axis (x, z means) at the origin."""
+    f = gt_height / (v[:, 1].max() - v[:, 1].min())
+    out = (v - np.array([v[:, 0].mean(), v[:, 1].min(), v[:, 2].mean()])) * f
+    return out
+
+
 def silhouette_masks(verts_by_name: dict, faces: np.ndarray, gt_name: str = "real body",
-                     size=(PANEL_W, CELL)) -> dict:
-    """Front-view (x right, y up) filled silhouettes on a shared canvas. Every mesh is uniformly
-    scaled to the GT mesh's height with its feet on a common baseline and its x-centre on the
-    canvas centre."""
+                     size=(PANEL_W, FRONT_H)) -> dict:
+    """Front-view (x right, y up) filled silhouettes of the torso and legs on a shared canvas, every
+    mesh scaled to the GT mesh's height with its feet on a common baseline."""
     import cv2
     W, H = size
     gt = verts_by_name[gt_name]
     gt_h = gt[:, 1].max() - gt[:, 1].min()
-    px_per_m = (H - 60) / gt_h
+    px_per_m = (H - 24) / gt_h
     masks = {}
     for name, v in verts_by_name.items():
-        h = v[:, 1].max() - v[:, 1].min()
-        f = gt_h / h
-        x = (v[:, 0] - v[:, 0].mean()) * f * px_per_m + W / 2
-        y = (H - 25) - (v[:, 1] - v[:, 1].min()) * f * px_per_m
-        tri = np.round(np.stack([x, y], axis=1)[faces]).astype(np.int32)
+        m_v = scaled_to_gt(v, gt_h)
+        keep = np.abs(m_v[:, 0])[faces].max(axis=1) <= ARM_CUT_M
+        x = m_v[:, 0] * px_per_m + W / 2
+        y = (H - 12) - m_v[:, 1] * px_per_m
+        tri = np.round(np.stack([x, y], axis=1)[faces[keep]]).astype(np.int32)
         m = np.zeros((H, W), np.uint8)
         for t in tri:
             cv2.fillConvexPoly(m, t, 255)
@@ -92,20 +104,50 @@ def silhouette_masks(verts_by_name: dict, faces: np.ndarray, gt_name: str = "rea
     return masks
 
 
-def shape_panel(masks: dict, gt_name: str = "real body") -> np.ndarray:
+def waist_slices(verts_by_name: dict, gt_name: str = "real body", width: int = PANEL_W,
+                 height: int = CELL - FRONT_H) -> dict:
+    """Top-view outline (convex hull) of the vertices within +-1.5 cm of the waist height, as pixel
+    polygons on a (width x height) canvas; every mesh is scaled to the GT height and centred on its
+    own body axis. The hull of that thin slab is the same construction the measurement tool uses
+    for the waist circumference."""
+    import cv2
+    gt = verts_by_name[gt_name]
+    gt_h = gt[:, 1].max() - gt[:, 1].min()
+    polys = {}
+    for name, v in verts_by_name.items():
+        m_v = scaled_to_gt(v, gt_h)
+        band = m_v[np.abs(m_v[:, 1] - WAIST_FRAC * gt_h) <= 0.015]
+        pts = np.stack([band[:, 0] * SLICE_PX_PER_M + width / 2,
+                        (height / 2 + 8) - band[:, 2] * SLICE_PX_PER_M], axis=1).astype(np.float32)
+        polys[name] = cv2.convexHull(pts).reshape(-1, 2) if len(pts) >= 3 else pts
+    return polys
+
+
+def shape_panel(masks: dict, slices: dict, gt_name: str = "real body") -> np.ndarray:
+    """Panel (CELL x PANEL_W): front view on top, waist cross-section (top view, front of the body
+    up) below. Real body = grey fill; models = coloured contours."""
     import cv2
     H, W = masks[gt_name].shape
-    img = np.full((H, W, 3), 255, np.uint8)
-    img[masks[gt_name] > 0] = (205, 205, 205)
+    img = np.full((CELL, W, 3), 255, np.uint8)
+    top = img[:H]
+    top[masks[gt_name] > 0] = (205, 205, 205)
     for name, m in masks.items():
         cs, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(img, cs, -1, (90, 90, 90) if name == gt_name else COLORS[name], 2)
-    y = 22
+        cv2.drawContours(top, cs, -1, (90, 90, 90) if name == gt_name else COLORS[name], 2)
+    y = 20
     for name in [gt_name] + [n for n in masks if n != gt_name]:
         col = (90, 90, 90) if name == gt_name else COLORS[name]
         cv2.rectangle(img, (8, y - 11), (24, y + 1), col, -1)
-        cv2.putText(img, name, (30, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (30, 30, 30), 1, cv2.LINE_AA)
-        y += 20
+        cv2.putText(img, name, (30, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (30, 30, 30), 1, cv2.LINE_AA)
+        y += 18
+    cv2.line(img, (0, FRONT_H), (W, FRONT_H), (210, 210, 210), 1)
+    cv2.putText(img, "waist cross-section (top view)", (8, FRONT_H + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
+                (30, 30, 30), 1, cv2.LINE_AA)
+    bottom = img[FRONT_H:]
+    cv2.fillPoly(bottom, [np.round(slices[gt_name]).astype(np.int32)], (205, 205, 205))
+    for name, poly in slices.items():
+        cv2.polylines(bottom, [np.round(poly).astype(np.int32)], True,
+                      (90, 90, 90) if name == gt_name else COLORS[name], 2, cv2.LINE_AA)
     return img
 
 
@@ -237,7 +279,7 @@ def cmd_compose(args) -> None:
         for n, d in per_model.items():
             verts[n] = vertices(d[fname]["pred"], "NEUTRAL")
         verts["mean body"] = vertices(np.zeros(10), "NEUTRAL")
-        shapes = shape_panel(silhouette_masks(verts, faces))
+        shapes = shape_panel(silhouette_masks(verts, faces), waist_slices(verts))
 
         photo = cv2.imread(str(rec.img_path))
         photo_crop = crop_to_bbox(photo, rec.bbox) if photo is not None else None
@@ -282,16 +324,33 @@ def self_test() -> None:
         ("MALE", "best", "m3"), ("MALE", "median", "m1"), ("MALE", "worst", "m0")], cases
     assert all(c["fname"].endswith("_0") for c in cases if c["gender"] == "FEMALE"), "first photo per person"
 
-    # silhouettes: same height after scaling, narrower body has the smaller area
-    faces = np.array([[0, 1, 2], [0, 2, 3]])
-    box = lambda w, h: np.array([[-w, 0, 0], [w, 0, 0], [w, h, 0], [-w, h, 0]], float)  # noqa: E731
-    verts = {"real body": box(0.3, 1.7), "CameraHMR": box(0.2, 1.5), "HMR2.0b": box(0.3, 1.9), "mean body": box(0.25, 1.7)}
+    # silhouettes and waist slices on toy bodies: a stack of rings of different radius
+    ys = np.linspace(0, 1.7, 69)   # rings every 2.5 cm so one falls inside the +-1.5 cm waist band
+    def toy_body(r_waist, height_scale=1.0):
+        pts, tris = [], []
+        n = 12
+        for i, y in enumerate(ys):
+            r = (0.10 + (r_waist - 0.10) * np.exp(-((y - 1.02) / 0.35) ** 2)) * (1 if y < 1.4 else 0.6)
+            pts += [[r * np.cos(a), y * height_scale, 0.7 * r * np.sin(a)] for a in np.linspace(0, 2 * np.pi, n, endpoint=False)]
+        for i in range(len(ys) - 1):
+            for k in range(n):
+                a, b = i * n + k, i * n + (k + 1) % n
+                tris += [[a, b, b + n], [a, b + n, a + n]]
+        return np.array(pts), np.array(tris)
+    (v_gt, faces), (v_big, _), (v_small, _), (v_tall, _) = (toy_body(0.22), toy_body(0.22), toy_body(0.14), toy_body(0.22, 1.2))
+    verts = {"real body": v_gt, "CameraHMR": v_small, "HMR2.0b": v_tall, "mean body": v_big}
     masks = silhouette_masks(verts, faces)
-    rows_of = {n: np.where(m.any(axis=1))[0] for n, m in masks.items()}
-    ext = {n: r.max() - r.min() for n, r in rows_of.items()}
-    assert max(ext.values()) - min(ext.values()) <= 2, ext
-    assert masks["CameraHMR"].sum() < masks["mean body"].sum() < masks["real body"].sum()
-    panel = shape_panel(masks)
+    ext = {n: np.ptp(np.where(m.any(axis=1))[0]) for n, m in masks.items()}
+    assert max(ext.values()) - min(ext.values()) <= 2, ext          # all scaled to the real body's height
+    assert masks["CameraHMR"].sum() < masks["mean body"].sum() <= masks["real body"].sum() * 1.01
+    slices = waist_slices(verts)
+    import cv2 as _cv2
+    area = {n: _cv2.contourArea(p.astype(np.float32)) for n, p in slices.items()}
+    assert area["CameraHMR"] < 0.7 * area["real body"], area         # narrower waist -> smaller slice
+    assert abs(area["mean body"] - area["real body"]) < 0.05 * area["real body"]
+    # a body 1.2x taller is scaled down uniformly (x and z too) to the real height: area shrinks by 1/1.2^2
+    assert abs(area["HMR2.0b"] / area["real body"] - 1 / 1.2 ** 2) < 0.05, area
+    panel = shape_panel(masks, slices)
     assert panel.shape == (CELL, PANEL_W, 3) and panel.min() < 255
 
     # find_overlay prefers a file whose name says overlay; none -> None
