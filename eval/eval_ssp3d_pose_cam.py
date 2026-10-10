@@ -49,8 +49,12 @@ SMPL_TO_COCO = {16: 5, 17: 6, 18: 7, 19: 8, 20: 9, 21: 10, 1: 11, 2: 12, 4: 13, 
 LEGS = [1, 2, 4, 5, 7, 8, 10, 11]                 # body-joint indices (SMPL joint number, 1..23)
 ARMS = [13, 14, 16, 17, 18, 19, 20, 21, 22, 23]
 TORSO = [3, 6, 9, 12, 15]
-METRICS = ["pa_mpjpe_mm", "mpjpe_root_mm", "rot_global_deg", "rot_body_deg", "rot_legs_deg", "rot_arms_deg",
-           "rot_torso_deg", "iou", "reproj_pct", "pck05", "pck10"]
+CORE = [j for j in range(24) if j not in (10, 11, 22, 23)]          # joints without the feet and hands
+METRICS = ["pa_mpjpe_mm", "pa_core_mm", "mpjpe_root_mm", "rot_global_deg", "rot_body_deg", "rot_core_deg",
+           "rot_legs_deg", "rot_arms_deg", "rot_torso_deg", "iou", "reproj_pct", "pck05", "pck10"]
+JOINT_NAMES = ["L_hip", "R_hip", "spine1", "L_knee", "R_knee", "spine2", "L_ankle", "R_ankle", "spine3", "L_foot",
+               "R_foot", "neck", "L_collar", "R_collar", "head", "L_shoulder", "R_shoulder", "L_elbow", "R_elbow",
+               "L_wrist", "R_wrist", "L_hand", "R_hand"]
 
 
 # ---------------------------------------------------------------- geometry
@@ -133,12 +137,15 @@ def rotation_errors(pred_global: np.ndarray, pred_body: np.ndarray, gt_aa: np.nd
     body = geodesic_deg(pred_body, gt_b)                       # (23,), joint i+1 at index i
     sel = lambda idx: float(body[[i - 1 for i in idx]].mean())  # noqa: E731
     return {"rot_global_deg": float(geodesic_deg(pred_global, gt_g)), "rot_body_deg": float(body.mean()),
-            "rot_legs_deg": sel(LEGS), "rot_arms_deg": sel(ARMS), "rot_torso_deg": sel(TORSO)}
+            "rot_core_deg": sel([j for j in range(1, 24) if j not in (10, 11, 22, 23)]),
+            "rot_legs_deg": sel(LEGS), "rot_arms_deg": sel(ARMS), "rot_torso_deg": sel(TORSO),
+            "_rot_joint": body}
 
 
 def score_image(pred_joints_cam, pred_verts_cam, pred_focal, pred_gl, pred_body, gt_joints, gt_aa,
                 gt_sil, joints2d, box_size, faces, w, h) -> dict:
     out = {"pa_mpjpe_mm": pa_mpjpe_mm(pred_joints_cam[:24], gt_joints[:24]),
+           "pa_core_mm": pa_mpjpe_mm(pred_joints_cam[CORE], gt_joints[CORE]),
            "mpjpe_root_mm": mpjpe_root_mm(pred_joints_cam[:24], gt_joints[:24])}
     out.update(rotation_errors(pred_gl, pred_body, gt_aa))
     out["iou"] = iou(silhouette_mask(pred_verts_cam, faces, pred_focal, w, h), gt_sil)
@@ -172,17 +179,26 @@ def print_tables(summ: list[dict]) -> None:
         if not sel:
             continue
         print(f"\n=== {title} ({sel[0]['n']} photos) ===")
-        print(f"{'':16s}{'PA-MPJPE':>9s}{'MPJPE-rt':>9s}{'rotGlob':>8s}{'rotBody':>8s}{'legs':>7s}{'arms':>7s}{'torso':>7s}"
+        print(f"{'':16s}{'PA-MPJPE':>9s}{'PA-core':>8s}{'MPJPE-rt':>9s}{'rotGlob':>8s}{'rotBody':>8s}{'rotCore':>8s}{'legs':>7s}{'arms':>7s}{'torso':>7s}"
               f"{'IoU':>7s}{'IoU med':>8s}{'reproj%':>8s}{'PCK5':>7s}{'PCK10':>7s}")
         for r in sel:
             f = lambda k, p=1: "      -" if np.isnan(r.get(k, float("nan"))) else f"{r[k]:{p}.{1}f}"  # noqa: E731
-            print(f"{r['method']:16s}{f('pa_mpjpe_mm', 9)}{f('mpjpe_root_mm', 9)}{f('rot_global_deg', 8)}{f('rot_body_deg', 8)}"
+            print(f"{r['method']:16s}{f('pa_mpjpe_mm', 9)}{f('pa_core_mm', 8)}{f('mpjpe_root_mm', 9)}{f('rot_global_deg', 8)}{f('rot_body_deg', 8)}{f('rot_core_deg', 8)}"
                   f"{f('rot_legs_deg', 7)}{f('rot_arms_deg', 7)}{f('rot_torso_deg', 7)}"
                   f"{'      -' if np.isnan(r['iou']) else format(r['iou'], '7.3f')}"
                   f"{'       -' if np.isnan(r.get('iou_median', float('nan'))) else format(r['iou_median'], '8.3f')}"
                   f"{f('reproj_pct', 8)}"
                   f"{'      -' if np.isnan(r['pck05']) else format(r['pck05'], '7.2f')}"
                   f"{'      -' if np.isnan(r['pck10']) else format(r['pck10'], '7.2f')}")
+
+
+def joint_table(rows: list[dict], methods: list[str]) -> list[str]:
+    """Mean rotation error (degrees) of each of the 23 body joints, per model, over all photos."""
+    lines = [f"{'joint':12s}" + "".join(f"{m[:10]:>11s}" for m in methods)]
+    per = {m: np.mean([r["_rot_joint"] for r in rows if r["method"] == m], axis=0) for m in methods}
+    for k, name in enumerate(JOINT_NAMES):
+        lines.append(f"{name:12s}" + "".join(f"{per[m][k]:11.1f}" for m in methods))
+    return lines
 
 
 def write_summary(summ: list[dict], path: Path) -> None:
@@ -245,7 +261,9 @@ def main() -> None:
         cam = lab["cam_trans"][i].astype(np.float64)
         sil = cv2.imread(str(root / "silhouettes" / fname), 0)
         h, w = sil.shape
-        sil = sil > 127
+        if i == 0:
+            print(f"silhouette file values (first photo): {np.unique(sil).tolist()[:8]}")
+        sil = sil >= max(1.0, sil.max() / 2.0)       # works for 0/1 and 0/255 masks
         j2d, box = lab["joints2D"][i], float(lab["bbox_whs"][i])
         base = {"gender": gender}
         # floor: the dataset's own body with its own camera
@@ -282,6 +300,8 @@ def main() -> None:
         summ.append(row)
     summ.sort(key=lambda r: ("all", "m", "f").index(r["group"]))
     print_tables(summ)
+    print("\nMean rotation error per body joint (degrees), all photos:")
+    print("\n".join(joint_table(rows, methods)))
     write_summary(summ, out_path)
 
 
@@ -309,6 +329,8 @@ def self_test() -> None:
     err = rotation_errors(np.eye(3), pred_body, gt_aa)
     assert abs(err["rot_legs_deg"] - np.degrees(0.5) / len(LEGS)) < 1e-6 and err["rot_arms_deg"] == 0.0
     assert abs(err["rot_body_deg"] - np.degrees(0.5) / 23) < 1e-6 and err["rot_global_deg"] == 0.0
+    assert err["_rot_joint"].shape == (23,) and abs(err["_rot_joint"][3] - np.degrees(0.5)) < 1e-6
+    assert abs(err["rot_core_deg"] - np.degrees(0.5) / 19) < 1e-6          # 19 body joints without feet/hands
 
     # projection and silhouettes
     assert np.allclose(project(np.array([[0, 0, 5.0], [1, 0, 5.0]]), 500, 512, 512), [[256, 256], [356, 256]])
@@ -343,6 +365,8 @@ def self_test() -> None:
     s = {(r["method"], r["group"]): r for r in summarize(rows, ["A"])}
     assert s[("A", "all")]["n"] == 2 and abs(s[("A", "all")]["iou"] - 0.75) < 1e-9 and s[("A", "f")]["iou"] == 0.5
     print_tables(summarize(rows, ["A"]))
+    jt = joint_table([{**r, "method": "A"} for r in rows], ["A"])
+    assert len(jt) == 24 and jt[4].split()[0] == "L_knee"
     print("\n[self-test] all checks passed.")
 
 
