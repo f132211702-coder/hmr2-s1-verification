@@ -101,6 +101,11 @@ def summarize(rows: list[dict], methods: list[str]) -> list[dict]:
         row["abs_dz_median_mm"] = float(np.median([r["abs_dz_mm"] for r in sel]))
         row["rel_dz_median_pct"] = float(np.median([r["rel_dz_pct"] for r in sel]))
         row["focal_model_px"] = float(np.mean([r["focal_px"] for r in sel]))
+        ratio = np.array([r["focal_ratio"] for r in sel])
+        row["asis_median_mm"] = float(np.median([r["mpjpe_asis_mm"] for r in sel]))
+        row["focal_ratio_p10"], row["focal_ratio_p50"], row["focal_ratio_p90"] = (float(np.percentile(ratio, q)) for q in (10, 50, 90))
+        row["share_depth_within_10pct"] = float(np.mean([r["rel_dz_pct"] < 10 for r in sel]))
+        row["share_focal_within_10pct"] = float(np.mean(np.abs(ratio - 1) < 0.10))
         out.append(row)
     return out
 
@@ -116,12 +121,18 @@ def print_table(summ: list[dict], gt_focal: float, gt_depth: float, gt_reproj: f
               f"{r['abs_dz_mm']:7.0f}{r['dz_mm']:+9.0f}{r['rel_dz_pct']:9.1f}{r['focal_model_px']:10.0f}")
     print("\n(all mm except 'rel dz%' and 'focal px'; dz bias > 0 = predicted body too far; "
           "'as-is' uses each model's own camera)")
+    print(f"\n{'':11s}{'as-is median':>14s}{'focal/true p10':>16s}{'p50':>7s}{'p90':>7s}{'focal<10% off':>15s}{'depth<10% off':>15s}")
+    for r in summ:
+        print(f"{r['method']:11s}{r['asis_median_mm']:14.0f}{r['focal_ratio_p10']:16.2f}{r['focal_ratio_p50']:7.2f}"
+              f"{r['focal_ratio_p90']:7.2f}{r['share_focal_within_10pct']:15.2f}{r['share_depth_within_10pct']:15.2f}")
 
 
 def write_summary(summ: list[dict], path: Path) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fields = ["method", "n"] + METRICS + ["abs_dz_median_mm", "rel_dz_median_pct", "focal_model_px"]
+    fields = ["method", "n"] + METRICS + ["abs_dz_median_mm", "rel_dz_median_pct", "focal_model_px", "asis_median_mm",
+                                          "focal_ratio_p10", "focal_ratio_p50", "focal_ratio_p90",
+                                          "share_depth_within_10pct", "share_focal_within_10pct"]
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         w.writeheader()
@@ -179,7 +190,7 @@ def main() -> None:
             J = forward(z["betas"][i], z["body_pose"][i], z["global_orient"][i])
             r = score_record(J, z["cam_t"][i], float(z["focal"][i]), z["img_wh"][i], first["joints_world"][i],
                              first["cam_pose"][i], first["K"][i])
-            rows.append({"method": name, "focal_px": float(z["focal"][i]), **r})
+            rows.append({"method": name, "focal_px": float(z["focal"][i]), "focal_ratio": float(z["focal"][i]) / first["K"][i][0, 0], **r})
         print(f"  scored {name}", flush=True)
     methods = list(specs)
     summ = summarize(rows, methods)
@@ -234,7 +245,8 @@ def self_test() -> None:
     r3 = score_record(pred_rel * 1.1, root_m - pred_rel[0] * 1.1, f_m, (W, H), joints_world, E, K)
     assert r3["pa_mpjpe_mm"] < 1e-6 and r3["mpjpe_root_mm"] > 10, r3
 
-    rows = [{"method": "A", "focal_px": 5000.0, **r}, {"method": "A", "focal_px": 5000.0, **r2}]
+    rows = [{"method": "A", "focal_px": 5000.0, "focal_ratio": 5000 / 1962, **r},
+            {"method": "A", "focal_px": 5000.0, "focal_ratio": 5000 / 1962, **r2}]
     s = summarize(rows, ["A"])
     assert s[0]["n"] == 2 and abs(s[0]["rel_dz_pct"] - (r["rel_dz_pct"] + r2["rel_dz_pct"]) / 2) < 1e-9
     print_table(s, 1962.0, 4.0, 0.0)
